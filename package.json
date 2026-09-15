@@ -1,0 +1,35 @@
+{
+  "name": "feellingpilates-pagos",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "scripts": {
+    "dev": "tsx watch src/server.ts",
+    "build": "tsc -b && prisma generate",
+    "start": "node dist/server.js",
+    "lint": "oxlint",
+    "prisma:generate": "prisma generate",
+    "prisma:migrate": "prisma migrate dev",
+    "prisma:deploy": "prisma migrate deploy"
+  },
+  "dependencies": {
+    "@prisma/client": "^6.3.1",
+    "cors": "^2.8.5",
+    "dotenv": "^17.0.0",
+    "express": "^4.21.2",
+    "jsonwebtoken": "^9.0.2",
+    "node-cron": "^3.0.3",
+    "stripe": "^17.5.0"
+  },
+  "devDependencies": {
+    "@types/cors": "^2.8.17",
+    "@types/express": "^4.17.21",
+    "@types/jsonwebtoken": "^9.0.7",
+    "@types/node": "^24.13.2",
+    "@types/node-cron": "^3.0.11",
+    "oxlint": "^1.71.0",
+    "prisma": "^6.3.1",
+    "tsx": "^4.19.2",
+    "typescript": "~6.0.2"
+  }
+}

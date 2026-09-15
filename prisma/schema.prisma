@@ -1,0 +1,74 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+  schemas  = ["pagos"]
+}
+
+// Catalogo de precios (Pilates / Bacu Fit / combos). Sin relacion a otros
+// dominios, por eso se pudo mudar completo desde el backend principal.
+model Paquete {
+  id             String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  categoria      String   @db.VarChar(20)
+  nombre         String   @db.VarChar(100)
+  descripcion    String?  @db.VarChar(255)
+  precioCentavos Int      @map("precio_centavos")
+  vigenciaDias   Int      @map("vigencia_dias")
+  unitarioTexto  String?  @map("unitario_texto") @db.VarChar(50)
+  destacado      Boolean  @default(false)
+  activo         Boolean  @default(true)
+  orden          Int      @default(0)
+  creadoEn       DateTime @default(now()) @map("creado_en") @db.Timestamptz
+  actualizadoEn  DateTime @default(now()) @updatedAt @map("actualizado_en") @db.Timestamptz
+
+  compras Compra[]
+
+  @@map("paquete")
+  @@schema("pagos")
+}
+
+// usuarioId apunta a usuario.id en el schema "public" del backend principal.
+// No se modela como relacion de Prisma (ese schema no es propiedad de este
+// servicio); el constraint de FK cross-schema vive solo en el SQL de
+// migracion, no aqui.
+model Compra {
+  id                    String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  usuarioId             String    @map("usuario_id") @db.Uuid
+  paqueteId             String    @map("paquete_id") @db.Uuid
+  montoCentavos         Int       @map("monto_centavos")
+  moneda                String    @default("mxn") @db.VarChar(3)
+  estado                String    @default("pendiente") @db.VarChar(20)
+  stripePaymentIntentId String?   @map("stripe_payment_intent_id") @db.VarChar(100)
+  idempotencyKey        String?   @map("idempotency_key") @db.VarChar(100)
+  fechaExpiracion       DateTime? @map("fecha_expiracion") @db.Timestamptz
+  creadoEn              DateTime  @default(now()) @map("creado_en") @db.Timestamptz
+  actualizadoEn         DateTime  @default(now()) @updatedAt @map("actualizado_en") @db.Timestamptz
+
+  // Detalle del Charge de Stripe, guardado cuando el pago se confirma
+  // (payment_intent.succeeded). Todo nullable porque no existe hasta entonces.
+  tarjetaMarca          String?   @map("tarjeta_marca") @db.VarChar(20)
+  tarjetaUltimosDigitos String?   @map("tarjeta_ultimos_digitos") @db.VarChar(4)
+  reciboUrl             String?   @map("recibo_url") @db.VarChar(500)
+  // Comision de Stripe y lo que realmente se recibe, en centavos (del
+  // balance_transaction del Charge).
+  montoComisionCentavos Int?      @map("monto_comision_centavos")
+  montoNetoCentavos     Int?      @map("monto_neto_centavos")
+  // Nivel de riesgo de Radar en el momento del cargo: normal/elevated/highest/
+  // not_assessed/unknown.
+  riesgoNivel           String?   @map("riesgo_nivel") @db.VarChar(20)
+  // Motivo del ultimo rechazo (payment_intent.payment_failed), para mostrarle
+  // al cliente por que fallo, no solo que fallo.
+  ultimoErrorCodigo     String?   @map("ultimo_error_codigo") @db.VarChar(100)
+  ultimoErrorMensaje    String?   @map("ultimo_error_mensaje") @db.VarChar(500)
+
+  paquete Paquete @relation(fields: [paqueteId], references: [id])
+
+  @@index([usuarioId])
+  @@index([stripePaymentIntentId])
+  @@index([idempotencyKey])
+  @@map("compra")
+  @@schema("pagos")
+}
