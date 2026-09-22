@@ -16,3 +16,8 @@ process.env.STRIPE_WEBHOOK_SECRET = "whsec_test_dummy";
 process.env.COMPRA_PENDIENTE_EXPIRA_MINUTOS = "60";
 process.env.CORS_ORIGENES_PERMITIDOS = "http://localhost:5173";
 process.env.PORT = "0";
+// Mismo mecanismo que en produccion (ver reusarSiExiste en pagoService.ts),
+// pero con una ventana mucho mas corta para que los tests de la carrera de
+// idempotencyKey no tarden segundos reales en correr.
+process.env.IDEMPOTENCY_ESPERA_INTERVALO_MS = "20";
+process.env.IDEMPOTENCY_ESPERA_MAX_INTENTOS = "10";

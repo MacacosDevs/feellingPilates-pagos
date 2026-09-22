@@ -150,12 +150,10 @@ describe("POST /api/pagos/paquetes/intento", () => {
     expect(stripeStub.paymentIntents.retrieve).toHaveBeenCalledTimes(1);
   });
 
-  it("dos requests simultaneos con la misma idempotencyKey: contra un Postgres real, el timing de la carrera es no determinista", async () => {
-    // Documenta el intento inicial de reproducir la carrera con
-    // Promise.all() contra un Postgres real (Testcontainers): el orden en
-    // que ambas requests intercalan sus awaits de red no es reproducible de
-    // una corrida a otra. La reproduccion determinista de la ventana de
-    // carrera esta en el siguiente test.
+  it("dos requests simultaneos con la misma idempotencyKey: ambas terminan en 200 con el mismo clientSecret (P1-1 corregido)", async () => {
+    // Contra un Postgres real (Testcontainers), la request perdedora de la
+    // carrera ahora espera brevemente (esperarAsignacionDeIntent) en vez de
+    // fallar de inmediato -- ver el fix en reusarSiExiste.
     const usuarioId = await crearUsuario();
     const paquete = await crearPaquete();
     const token = generarToken({ sub: usuarioId });
@@ -168,7 +166,7 @@ describe("POST /api/pagos/paquetes/intento", () => {
       }
       return intentCreado;
     });
-    stripeStub.paymentIntents.retrieve.mockRejectedValue(errorDeclineStripe(400, "No such payment_intent"));
+    stripeStub.paymentIntents.retrieve.mockImplementation(async () => intentCreado);
 
     const [r1, r2] = await Promise.all([
       request(app)
@@ -181,25 +179,51 @@ describe("POST /api/pagos/paquetes/intento", () => {
         .send({ paqueteIds: [paquete.id], idempotencyKey }),
     ]);
 
-    // Ambas respuestas deben ser 200 (exito) o 502 stripe_decline (la
-    // perdedora de la carrera, ver hallazgo P1 en MATRIZ-COBERTURA.md) --
-    // nunca otra cosa. Cuando ambas caen en 200 esta corrida no disparo la
-    // ventana de carrera; el siguiente test la fuerza de forma deterministica.
     for (const res of [r1, r2]) {
-      expect([200, 502]).toContain(res.status);
-      if (res.status === 502) {
-        expect(res.body.origen).toBe("stripe_decline");
-      }
+      expect(res.status).toBe(200);
+      expect(res.body.clientSecret).toBe("secret_concurrente");
     }
+    // Un solo PaymentIntent real creado, sin importar cual request "gano".
+    expect(stripeStub.paymentIntents.create).toHaveBeenCalledTimes(1);
   });
 
-  it("reusarSiExiste sobre una Compra a medio crear (stripePaymentIntentId aun null) responde 502 en vez de esperar/reintentar", async () => {
+  it("reusarSiExiste sobre una Compra a medio crear: si el intent se asigna poco despues, espera y lo reusa en vez de fallar", async () => {
     // Reproduce de forma deterministica el estado exacto en el que queda la
     // BD a mitad de crearIntentoPago: el paso 1 (crear las filas Compra con
     // idempotencyKey) ya se ejecuto, pero el paso 2 (llamar a Stripe y
-    // guardar stripePaymentIntentId via updateMany) todavia no. Es
-    // exactamente lo que ve una segunda request con la misma idempotencyKey
-    // si llega en esa ventana.
+    // guardar stripePaymentIntentId via updateMany) todavia no. Simula que
+    // la request ganadora termina un instante despues (dentro de la ventana
+    // de espera configurada, ver tests/setup/testEnv.ts).
+    const usuarioId = await crearUsuario();
+    const paquete = await crearPaquete();
+    const token = generarToken({ sub: usuarioId });
+    const idempotencyKey = randomUUID();
+
+    const { crearCompra } = await import("../helpers/db.js");
+    const { prisma } = await import("../../src/lib/prisma.js");
+    const compra = await crearCompra({ usuarioId, paqueteId: paquete.id, idempotencyKey, stripePaymentIntentId: null });
+
+    setTimeout(() => {
+      prisma.compra.update({ where: { id: compra.id }, data: { stripePaymentIntentId: "pi_tardio" } }).catch(() => {});
+    }, 40);
+    stripeStub.paymentIntents.retrieve.mockResolvedValueOnce({ id: "pi_tardio", client_secret: "secret_tardio" });
+
+    const res = await request(app)
+      .post("/api/pagos/paquetes/intento")
+      .set("Authorization", `Bearer ${token}`)
+      .send({ paqueteIds: [paquete.id], idempotencyKey });
+
+    expect(res.status).toBe(200);
+    expect(res.body.clientSecret).toBe("secret_tardio");
+    expect(res.body.compraIds).toEqual([compra.id]);
+    expect(stripeStub.paymentIntents.create).not.toHaveBeenCalled();
+  });
+
+  it("reusarSiExiste sobre una Compra que nunca llega a tener intent: responde 502 origen=internal_error, sin llamar a Stripe con un id nulo", async () => {
+    // La request original que creo estas filas Compra nunca termino (se
+    // cayo, crasheo) -- el intent nunca se asigna. Tras agotar la ventana de
+    // espera, se debe fallar de forma clara y segura, no colgarse ni pasarle
+    // null a stripe.paymentIntents.retrieve.
     const usuarioId = await crearUsuario();
     const paquete = await crearPaquete();
     const token = generarToken({ sub: usuarioId });
@@ -208,21 +232,14 @@ describe("POST /api/pagos/paquetes/intento", () => {
     const { crearCompra } = await import("../helpers/db.js");
     await crearCompra({ usuarioId, paqueteId: paquete.id, idempotencyKey, stripePaymentIntentId: null });
 
-    stripeStub.paymentIntents.retrieve.mockRejectedValueOnce(errorDeclineStripe(400, "No such payment_intent"));
-
     const res = await request(app)
       .post("/api/pagos/paquetes/intento")
       .set("Authorization", `Bearer ${token}`)
       .send({ paqueteIds: [paquete.id], idempotencyKey });
 
-    // HALLAZGO P1 (ver MATRIZ-COBERTURA.md): un cliente que reintenta por un
-    // timeout, o un doble-tap, durante esta ventana de milisegundos recibe un
-    // 502 "stripe_decline" en vez de que el sistema espere/reintente o le
-    // devuelva el intent real una vez creado. El origen es enganoso: no es
-    // un decline real de Stripe, es que reusarSiExiste llamo a
-    // stripe.paymentIntents.retrieve con un id todavia nulo.
     expect(res.status).toBe(502);
-    expect(res.body.origen).toBe("stripe_decline");
+    expect(res.body.origen).toBe("internal_error");
+    expect(stripeStub.paymentIntents.retrieve).not.toHaveBeenCalled();
     expect(stripeStub.paymentIntents.create).not.toHaveBeenCalled();
   });
 

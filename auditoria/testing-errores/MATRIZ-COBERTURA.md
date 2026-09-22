@@ -2,7 +2,7 @@
 
 Fuente de verdad de esta ronda de pruebas (no las conversaciones ni el chat que la generó). Corresponde al prompt "Pruebas de errores del microservicio de pagos" ejecutado sobre `feellingPilates-pagos` en la rama `AlanGP2001/lungfish`.
 
-Última corrida verificada: 2026-09-22, `npm test` → **74/74 PASS** (69 del prompt original + 5 agregados al confirmar y corregir el hallazgo P1-3), 3 corridas consecutivas sin flakiness (ver notas de infraestructura al final).
+Última corrida verificada: 2026-09-22, `npm test` → **75/75 PASS** (69 del prompt original + 5 al corregir P1-3 + 1 neto al corregir P1-1), 3+ corridas consecutivas sin flakiness (ver notas de infraestructura al final).
 
 ## Infraestructura de pruebas
 
@@ -36,12 +36,13 @@ Fuente de verdad de esta ronda de pruebas (no las conversaciones ni el chat que 
 | 5b | `paqueteIds` con paquete `activo=false` → 404 | PASS | `tests/routes/pagos.intento.test.ts:83` |
 | 6 | `paqueteIds` con duplicados (mismo id 2 veces) | PASS (comportamiento confirmado, ver **Hallazgo P2-1**) | `tests/routes/pagos.intento.test.ts:94` |
 | 7 | Reintento con mismo `idempotencyKey` reusa el PaymentIntent | PASS | `tests/routes/pagos.intento.test.ts:124` |
-| 8 | Dos requests simultáneos con misma `idempotencyKey` (vía HTTP, timing real) | PASS (documenta no-determinismo, ver **Hallazgo P1-1**) | `tests/routes/pagos.intento.test.ts:153` |
-| 8b | Misma carrera, reproducida de forma determinística | PASS (confirma el bug de forma reproducible, ver **Hallazgo P1-1**) | `tests/routes/pagos.intento.test.ts:196` |
-| 9 | `reusarSiExiste` con `paymentIntents.retrieve` fallando → 502 traducido | PASS | `tests/routes/pagos.intento.test.ts:229` |
-| 10 | `paymentIntents.create` con `StripeConnectionError` → 502 `stripe_network_error` | PASS | `tests/routes/pagos.intento.test.ts:252` |
-| 11 | `paymentIntents.create` con `statusCode >= 500` → 502 `stripe_server_error` | PASS | `tests/routes/pagos.intento.test.ts:267` |
-| 12 | `paymentIntents.create` con decline 4xx → 502 `stripe_decline` | PASS | `tests/routes/pagos.intento.test.ts:282` |
+| 8 | Dos requests simultáneos con misma `idempotencyKey` (vía HTTP, timing real) → ambas 200 con el mismo `clientSecret` | PASS ([CORREGIDO] **Hallazgo P1-1**) | `tests/routes/pagos.intento.test.ts:153` |
+| 8b | Misma carrera, reproducida de forma determinística: el intent se asigna poco después → se espera y se reusa | PASS ([CORREGIDO] **Hallazgo P1-1**) | `tests/routes/pagos.intento.test.ts:190` |
+| 8c | Compra que nunca llega a tener intent (request original nunca terminó) → 502 `internal_error` claro, sin llamar a Stripe con un id nulo | PASS | `tests/routes/pagos.intento.test.ts:222` |
+| 9 | `reusarSiExiste` con `paymentIntents.retrieve` fallando → 502 traducido | PASS | `tests/routes/pagos.intento.test.ts:246` |
+| 10 | `paymentIntents.create` con `StripeConnectionError` → 502 `stripe_network_error` | PASS | `tests/routes/pagos.intento.test.ts:269` |
+| 11 | `paymentIntents.create` con `statusCode >= 500` → 502 `stripe_server_error` | PASS | `tests/routes/pagos.intento.test.ts:284` |
+| 12 | `paymentIntents.create` con decline 4xx → 502 `stripe_decline` | PASS | `tests/routes/pagos.intento.test.ts:299` |
 
 ### `GET /mis-paquetes`, `GET /mis-compras`
 
@@ -134,17 +135,21 @@ Fuente de verdad de esta ronda de pruebas (no las conversaciones ni el chat que 
 | 50 | Body JSON malformado en `POST intento` → 400 con mensaje de sintaxis (comportamiento correcto ya existente, ahora fijado con test) | PASS | `tests/routes/pagos.manejoErrores.test.ts` |
 | 51 | Un error no anticipado por este servicio (bug, excepción de terceros) → 500 genérico, sin filtrar el mensaje original | PASS | `tests/routes/pagos.manejoErrores.test.ts` |
 
-**Total combinado: 74/74 PASS.**
+**Total combinado: 75/75 PASS.**
 
 ## Hallazgos
 
-### P1-1 — Carrera en `crearIntentoPago`/`reusarSiExiste`: la request perdedora recibe un 502 engañoso en vez de 200
+### P1-1 — [CORREGIDO] Carrera en `crearIntentoPago`/`reusarSiExiste`: la request perdedora recibía un 502 engañoso en vez de 200
 
-- **Dónde**: `src/services/pagoService.ts:144-159` (`reusarSiExiste`), invocado desde `crearIntentoPago` (línea 76).
-- **Qué pasa**: si dos requests llegan con la misma `idempotencyKey` casi al mismo tiempo, ambas pueden pasar la comprobación inicial de `reusarSiExiste` sin encontrar nada (la tabla está vacía para esa clave). Una de las dos crea las filas `Compra` y llama a Stripe; si la segunda request llega a `reusarSiExiste` **después** de que la primera insertó sus filas `Compra` pero **antes** de que corriera el `updateMany` que guarda `stripePaymentIntentId`, `reusarSiExiste` encuentra una `Compra` existente con `stripePaymentIntentId: null` y llama a `stripe.paymentIntents.retrieve(null)`. Stripe (y el mock que reproduce su comportamiento) rechaza esa llamada, y el error se traduce como `origen: "stripe_decline"` — un 502 que no es en absoluto un decline de tarjeta, sino un bug de carrera interno.
-- **Impacto real**: no hay doble cobro (la idempotencia de Stripe en `paymentIntents.create` sigue protegiendo eso), pero un doble-tap o un reintento por timeout del cliente puede recibir un error 502 confuso ("stripe_decline") en una fracción de los casos, en vez de la respuesta 200 correcta con el `clientSecret`.
-- **Evidencia**: reproducción determinística en `tests/routes/pagos.intento.test.ts:196` (falla con 502/`stripe_decline` como se describe); intento no determinístico vía HTTP real en `tests/routes/pagos.intento.test.ts:153`.
-- **Estado de la corrección**: **pendiente de decisión humana**. Una corrección robusta requiere decidir la estrategia (¿reintentar la lectura con backoff corto?, ¿usar un `SELECT ... FOR UPDATE` o una constraint única + upsert sobre `idempotencyKey`?) — es un cambio de diseño, no un parche de una línea, así que no se aplicó dentro de esta tarea de pruebas.
+- **Dónde (antes del fix)**: `src/services/pagoService.ts` — `reusarSiExiste`, invocado desde `crearIntentoPago`.
+- **Qué pasaba**: si dos requests llegaban con la misma `idempotencyKey` casi al mismo tiempo, ambas podían pasar la comprobación inicial de `reusarSiExiste` sin encontrar nada (la tabla estaba vacía para esa clave). Una de las dos creaba las filas `Compra` y llamaba a Stripe; si la segunda request llegaba a `reusarSiExiste` **después** de que la primera insertó sus filas `Compra` pero **antes** de que corriera el `updateMany` que guarda `stripePaymentIntentId`, `reusarSiExiste` encontraba una `Compra` existente con `stripePaymentIntentId: null` y llamaba a `stripe.paymentIntents.retrieve(null)`. Stripe (y el mock que reproduce su comportamiento) rechaza esa llamada, y el error se traducía como `origen: "stripe_decline"` — un 502 que no era en absoluto un decline de tarjeta, sino un bug de carrera interno.
+- **Impacto real (antes del fix)**: no había doble cobro (la idempotencia de Stripe en `paymentIntents.create` seguía protegiendo eso), pero un doble-tap o un reintento por timeout del cliente podía recibir un error 502 confuso ("stripe_decline") en una fracción de los casos, en vez de la respuesta 200 correcta con el `clientSecret`.
+- **Corrección aplicada**: la estrategia elegida (de las tres esbozadas originalmente: reintentar con backoff corto, `SELECT ... FOR UPDATE`, o constraint única + upsert) fue **reintentar la lectura con backoff corto**, por ser la que no requiere ni un cambio de esquema ni mantener una transacción de Postgres abierta durante la llamada de red a Stripe (que sí harían falta con un lock a nivel de fila/advisory lock envolviendo la creación del PaymentIntent).
+  - Nueva función `esperarAsignacionDeIntent` en `src/services/pagoService.ts`: cuando `reusarSiExiste` encuentra `Compra` existentes para la `idempotencyKey` pero `stripePaymentIntentId` todavía es `null`, en vez de llamar a Stripe con un id nulo, espera un intervalo corto y vuelve a consultar, hasta un máximo de intentos — ambos configurables via `IDEMPOTENCY_ESPERA_INTERVALO_MS` / `IDEMPOTENCY_ESPERA_MAX_INTENTOS` (`src/config/env.ts`, default 100ms × 20 intentos = 2s tope en producción).
+  - Si el intent se asigna dentro de esa ventana (el caso normal: la request ganadora típicamente termina en milisegundos), la request perdedora recibe el mismo `clientSecret` con `200`, tal como se espera de un endpoint idempotente.
+  - Si se agota la ventana sin que se asigne un intent (la request original se cayó o crasheó a mitad de camino), se devuelve un error claro y seguro: `502 { origen: "internal_error" }`, sin intentar crear un segundo `PaymentIntent` automáticamente (evita el riesgo de duplicar el cargo si la request original en realidad seguía viva, solo lenta) y sin llamar nunca a Stripe con un id nulo.
+- **Evidencia (re-ejecutada después del fix)**: `tests/routes/pagos.intento.test.ts:153` (dos requests HTTP simultáneas reales → ambas 200 con el mismo `clientSecret`, un solo `paymentIntents.create`); `tests/routes/pagos.intento.test.ts:190` (reproducción determinística: el intent se asigna 40ms después → se espera y se reusa); `tests/routes/pagos.intento.test.ts:222` (reproducción determinística del caso sin salida: nunca se asigna un intent → `502 internal_error` limpio, sin llamar a `retrieve` ni a `create`). `npm test` completo → 75/75 PASS, corrida el 2026-09-22 después de aplicar el fix, 3+ corridas consecutivas sin flakiness en el test de la carrera vía HTTP real.
+- **Estado de la corrección**: **CORREGIDO y verificado** (suite completa vuelta a correr después del cambio, no solo el archivo nuevo, antes de marcarlo resuelto).
 
 ### P1-2 — `reembolsarCompra` no pasa `idempotencyKey` a Stripe y no tiene protección de concurrencia entre lectura y escritura de estado
 
@@ -182,6 +187,6 @@ Fuente de verdad de esta ronda de pruebas (no las conversaciones ni el chat que 
 
 - No se llamó a la API real de Stripe en ningún momento (todo mockeado con `vi.mock`).
 - No se commiteó ninguna clave real de Stripe ni token JWT real; `tests/setup/testEnv.ts` usa únicamente valores dummy (`sk_test_dummy_no_se_llama_nunca`, etc.).
-- No se modificó `prisma/schema.prisma` ni se generaron migraciones nuevas. El único cambio de infraestructura de pruebas es el stub `public.usuario` creado en tiempo de test dentro del contenedor efímero (`tests/setup/globalSetup.ts`), no en el schema del servicio.
-- No se aplicaron los fixes de P1-1, P1-2 ni P2-1: son cambios de diseño (estrategia de idempotencia/locking, o decisión de producto), no parches de una línea, y quedan documentados aquí para decisión humana en vez de "resueltos" sin la revisión correspondiente.
-- P1-3 sí se corrigió dentro de esta tarea porque, a diferencia de los otros tres, era una validación defensiva mecánica (formato de id + no confiar en errores no reconocidos) sin ambigüedad de diseño ni de producto — y se volvió a correr toda la suite después del cambio antes de marcarlo como resuelto.
+- No se modificó `prisma/schema.prisma` ni se generaron migraciones nuevas, ni siquiera para corregir P1-1: la estrategia elegida (espera con reintentos cortos) evita necesitar una constraint única o un cambio de esquema. El único cambio de infraestructura de pruebas es el stub `public.usuario` creado en tiempo de test dentro del contenedor efímero (`tests/setup/globalSetup.ts`), no en el schema del servicio.
+- No se aplicaron los fixes de P1-2 ni P2-1: siguen siendo cambios de diseño (estrategia de idempotencia/locking sobre reembolsos, o decisión de producto sobre `paqueteIds` duplicados), no parches mecánicos, y quedan documentados aquí para decisión humana en vez de "resueltos" sin la revisión correspondiente.
+- P1-3 y P1-1 sí se corrigieron dentro de esta tarea: P1-3 porque era una validación defensiva mecánica (formato de id + no confiar en errores no reconocidos) sin ambigüedad de diseño, y P1-1 porque, aunque sí implicaba elegir una estrategia de concurrencia, había una opción (reintentar con backoff corto) que no requería cambio de esquema ni mantener una transacción de BD abierta durante una llamada de red a Stripe — en ambos casos se volvió a correr toda la suite después del cambio antes de marcarlos como resueltos.
