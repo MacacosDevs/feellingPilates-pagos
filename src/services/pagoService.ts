@@ -60,6 +60,20 @@ export interface ReembolsoResponse {
   montoReembolsadoCentavos: number;
 }
 
+const REGEX_UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+// Valida el formato ANTES de que el id llegue a una columna @db.Uuid de
+// Prisma. Sin este chequeo, un id con formato invalido hace que Prisma lance
+// PrismaClientKnownRequestError (P2023) con el detalle interno de la query
+// (archivo, linea, stack) en el mensaje -- manejadorErrores ya no reenvia
+// ese detalle al cliente, pero aqui se prefiere devolver un 400 claro en vez
+// de depender solo del 500 generico de respaldo.
+function validarUuid(id: string, campo: string): void {
+  if (!REGEX_UUID.test(id)) {
+    throw new ValidacionError(`${campo} invalido`);
+  }
+}
+
 // Un carrito genera una Compra por paquete elegido; todas comparten
 // idempotencyKey y, mas abajo, el mismo PaymentIntent. Espejo de
 // PagoService.crearIntentoPago en el backend Java.
@@ -70,6 +84,9 @@ export async function crearIntentoPago(
 ): Promise<CrearPagoResponse> {
   if (!paqueteIds || paqueteIds.length === 0) {
     throw new ValidacionError("Debes seleccionar al menos un paquete");
+  }
+  for (const paqueteId of paqueteIds) {
+    validarUuid(paqueteId, "paqueteId");
   }
 
   if (idempotencyKey) {
@@ -212,6 +229,7 @@ export async function obtenerHistorialCompras(usuarioId: string): Promise<Compra
 // ya mismo, sin esperar a que llegue el webhook o al proximo ciclo de
 // reconciliacion.
 export async function obtenerEstadoEnVivo(compraId: string, usuarioId: string): Promise<EstadoEnVivoResponse> {
+  validarUuid(compraId, "compraId");
   const compra = await prisma.compra.findUnique({ where: { id: compraId } });
   if (!compra) {
     throw new RecursoNoEncontradoError("Compra no encontrada");
@@ -407,6 +425,7 @@ async function marcarComoReembolsada(charge: Stripe.Charge): Promise<void> {
 // correlacionar, desde el webhook charge.refunded, que linea corresponde a
 // que reembolso parcial. Se prefiere reembolsar y marcar todo el grupo junto.
 export async function reembolsarCompra(compraId: string): Promise<ReembolsoResponse> {
+  validarUuid(compraId, "compraId");
   const compra = await prisma.compra.findUnique({ where: { id: compraId } });
   if (!compra) {
     throw new RecursoNoEncontradoError("Compra no encontrada");
