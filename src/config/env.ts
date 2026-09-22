@@ -17,6 +17,12 @@ export const env = {
   stripeWebhookSecret: process.env.STRIPE_WEBHOOK_SECRET ?? "",
   compraPendienteExpiraMinutos: Number(process.env.COMPRA_PENDIENTE_EXPIRA_MINUTOS ?? 60),
   corsOrigenesPermitidos: (process.env.CORS_ORIGENES_PERMITIDOS ?? "http://localhost:5173").split(","),
+  // Ver reusarSiExiste en pagoService.ts: cuanto esperar (y cuantas veces
+  // reintentar) a que otra request con la misma idempotencyKey termine de
+  // asignarle un PaymentIntent a su grupo de Compra, antes de darse por
+  // vencido. Configurable para poder acortarlo en tests.
+  idempotencyEsperaIntervaloMs: Number(process.env.IDEMPOTENCY_ESPERA_INTERVALO_MS ?? 100),
+  idempotencyEsperaMaxIntentos: Number(process.env.IDEMPOTENCY_ESPERA_MAX_INTENTOS ?? 20),
 };
 
 // Igual que StripeConfig.java: mientras STRIPE_SECRET_KEY este vacio, el

@@ -158,21 +158,65 @@ export async function crearIntentoPago(
 
 // Si ya existe un grupo de Compra con esta clave (reintento tras timeout,
 // doble tap), se reutiliza su PaymentIntent en vez de crear uno nuevo.
+//
+// HALLAZGO P1-1 (corregido): crearIntentoPago no es atomico -- primero
+// inserta las filas Compra con idempotencyKey, y recien despues (tras
+// llamar a Stripe) les asigna stripePaymentIntentId via updateMany. Si una
+// segunda request con la misma idempotencyKey cae justo en esa ventana,
+// encuentra Compra ya creadas pero con stripePaymentIntentId todavia null.
+// Antes de este fix, eso disparaba stripe.paymentIntents.retrieve(null), que
+// Stripe rechaza, y el error se traducia como un 502 "stripe_decline"
+// enganoso. Ahora se espera brevemente (con reintentos cortos) a que la
+// request ganadora termine de asignar el intent, en vez de fallar de
+// inmediato.
 async function reusarSiExiste(idempotencyKey: string): Promise<CrearPagoResponse | null> {
-  const existentes = await prisma.compra.findMany({ where: { idempotencyKey } });
-  if (existentes.length === 0) {
+  const existentes = await esperarAsignacionDeIntent(idempotencyKey);
+  if (existentes === null) {
     return null;
   }
+
   try {
-    const intent = await stripe.paymentIntents.retrieve(existentes[0].stripePaymentIntentId!);
+    const intent = await stripe.paymentIntents.retrieve(existentes.stripePaymentIntentId);
     return {
-      compraIds: existentes.map((c) => c.id),
+      compraIds: existentes.compraIds,
       clientSecret: intent.client_secret,
       publishableKey: env.stripePublishableKey,
     };
   } catch (e) {
     throw traducirErrorStripe(e, "recuperar el PaymentIntent existente");
   }
+}
+
+interface CompraExistenteConIntent {
+  compraIds: string[];
+  stripePaymentIntentId: string;
+}
+
+async function esperarAsignacionDeIntent(idempotencyKey: string): Promise<CompraExistenteConIntent | null> {
+  for (let intento = 0; intento < env.idempotencyEsperaMaxIntentos; intento++) {
+    const existentes = await prisma.compra.findMany({ where: { idempotencyKey } });
+    if (existentes.length === 0) {
+      return null;
+    }
+    const stripePaymentIntentId = existentes[0].stripePaymentIntentId;
+    if (stripePaymentIntentId) {
+      return { compraIds: existentes.map((c) => c.id), stripePaymentIntentId };
+    }
+    // Las filas Compra ya existen pero la request que las creo todavia no
+    // termino de llamar a Stripe y guardar el intent -- se espera un
+    // instante corto y se vuelve a consultar en vez de asumir que fallo.
+    await new Promise((resolve) => setTimeout(resolve, env.idempotencyEsperaIntervaloMs));
+  }
+
+  // Se agoto la espera: lo mas probable es que la request original haya
+  // fallado o se haya caido antes de terminar. No se intenta crear un
+  // PaymentIntent nuevo automaticamente aqui -- si esa request en realidad
+  // seguia viva (solo lenta), eso arriesgaria un segundo PaymentIntent real.
+  // Se devuelve un error claro para que el cliente decida si reintentar.
+  throw new ErrorPago(
+    "El intento de pago para esta idempotencyKey no termino de crearse a tiempo, intenta de nuevo en unos segundos",
+    "internal_error",
+  );
 }
 
 // No existe todavia un sistema de reservas que descuente clases usadas de una
