@@ -2,7 +2,7 @@
 
 Fuente de verdad de esta ronda de pruebas (no las conversaciones ni el chat que la generó). Corresponde al prompt "Pruebas de errores del microservicio de pagos" ejecutado sobre `feellingPilates-pagos` en la rama `AlanGP2001/lungfish`.
 
-Última corrida verificada: 2026-09-22, `npm test` → **75/75 PASS** (69 del prompt original + 5 al corregir P1-3 + 1 neto al corregir P1-1), 3+ corridas consecutivas sin flakiness (ver notas de infraestructura al final).
+Última corrida verificada: 2026-09-22, `npm test` → **76/76 PASS** (69 del prompt original + 5 al corregir P1-3 + 1 neto al corregir P1-1 + 1 neto al corregir P1-2), 3+ corridas consecutivas sin flakiness (ver notas de infraestructura al final).
 
 ## Infraestructura de pruebas
 
@@ -76,9 +76,10 @@ Fuente de verdad de esta ronda de pruebas (no las conversaciones ni el chat que 
 | 24 | `stripe.refunds.create` falla → 502 y **no** se actualiza el estado en BD | PASS | `tests/routes/pagos.reembolso.test.ts:76` |
 | 25 | Reembolso exitoso marca `reembolsada` y devuelve el monto | PASS | `tests/routes/pagos.reembolso.test.ts:92` |
 | 26 | Reembolso ya hecho (doble refund por nuestro propio endpoint) → 400 en el segundo intento, sin volver a llamar a Stripe | PASS | `tests/routes/pagos.reembolso.test.ts:109` |
-| 27 | Refund concurrente vía HTTP (timing real) → nunca 500/502 inesperado | PASS | `tests/routes/pagos.reembolso.test.ts:128` |
-| 27b | Refund concurrente reproducido llamando al service 2 veces en paralelo | PASS (confirma el riesgo, ver **Hallazgo P1-2**) | `tests/routes/pagos.reembolso.test.ts:147` |
-| — | `refunds.create` no recibe `idempotencyKey` | PASS (confirma el gap, ver **Hallazgo P1-2**) | `tests/routes/pagos.reembolso.test.ts:177` |
+| 27 | Refund concurrente vía HTTP (timing real) → nunca 500/502 inesperado, toda llamada real usa la misma `idempotencyKey` | PASS ([CORREGIDO] **Hallazgo P1-2**) | `tests/routes/pagos.reembolso.test.ts:128` |
+| 27b | Refund concurrente reproducido llamando al service 2 veces en paralelo → misma `idempotencyKey` determinística en ambas | PASS ([CORREGIDO] **Hallazgo P1-2**) | `tests/routes/pagos.reembolso.test.ts:149` |
+| 27c | `refunds.create` recibe `idempotencyKey` determinística por `PaymentIntent` | PASS ([CORREGIDO] **Hallazgo P1-2**) | `tests/routes/pagos.reembolso.test.ts:173` |
+| 27d | Stripe rechaza el refund por conflicto de `idempotencyKey` en vuelo, pero el grupo ya quedó reembolsado por la otra request → devuelve éxito, no 502 | PASS | `tests/routes/pagos.reembolso.test.ts:190` |
 
 ### `GET /admin/payouts`
 
@@ -135,7 +136,7 @@ Fuente de verdad de esta ronda de pruebas (no las conversaciones ni el chat que 
 | 50 | Body JSON malformado en `POST intento` → 400 con mensaje de sintaxis (comportamiento correcto ya existente, ahora fijado con test) | PASS | `tests/routes/pagos.manejoErrores.test.ts` |
 | 51 | Un error no anticipado por este servicio (bug, excepción de terceros) → 500 genérico, sin filtrar el mensaje original | PASS | `tests/routes/pagos.manejoErrores.test.ts` |
 
-**Total combinado: 75/75 PASS.**
+**Total combinado: 76/76 PASS.**
 
 ## Hallazgos
 
@@ -151,13 +152,15 @@ Fuente de verdad de esta ronda de pruebas (no las conversaciones ni el chat que 
 - **Evidencia (re-ejecutada después del fix)**: `tests/routes/pagos.intento.test.ts:153` (dos requests HTTP simultáneas reales → ambas 200 con el mismo `clientSecret`, un solo `paymentIntents.create`); `tests/routes/pagos.intento.test.ts:190` (reproducción determinística: el intent se asigna 40ms después → se espera y se reusa); `tests/routes/pagos.intento.test.ts:222` (reproducción determinística del caso sin salida: nunca se asigna un intent → `502 internal_error` limpio, sin llamar a `retrieve` ni a `create`). `npm test` completo → 75/75 PASS, corrida el 2026-09-22 después de aplicar el fix, 3+ corridas consecutivas sin flakiness en el test de la carrera vía HTTP real.
 - **Estado de la corrección**: **CORREGIDO y verificado** (suite completa vuelta a correr después del cambio, no solo el archivo nuevo, antes de marcarlo resuelto).
 
-### P1-2 — `reembolsarCompra` no pasa `idempotencyKey` a Stripe y no tiene protección de concurrencia entre lectura y escritura de estado
+### P1-2 — [CORREGIDO] `reembolsarCompra` no pasaba `idempotencyKey` a Stripe ni tenía protección de concurrencia entre lectura y escritura de estado
 
-- **Dónde**: `src/services/pagoService.ts:409-433` (`reembolsarCompra`), específicamente la llamada `stripe.refunds.create({ payment_intent: ... })` en la línea 424 (sin segundo argumento de `requestOptions`).
-- **Qué pasa**: a diferencia de `crearIntentoPago`, que sí pasa `idempotencyKey` a `stripe.paymentIntents.create` (línea 124) como "doble seguro" documentado en el propio código, `reembolsarCompra` no tiene un mecanismo equivalente. Además, el chequeo `compra.estado !== "pagada"` (lectura) y el `updateMany` a `"reembolsada"` (escritura, tras llamar a Stripe) no están protegidos por ningún lock: dos requests concurrentes al mismo `compraId` pueden ambas leer `"pagada"` antes de que cualquiera escriba, y ambas terminan llamando a `stripe.refunds.create`.
-- **Impacto real**: el propio saldo de Stripe evita que se reembolse más del monto ya cobrado (una segunda llamada de reembolso total sobre un cargo ya reembolsado en su totalidad es rechazada por Stripe), así que el riesgo de pérdida de dinero real es bajo, pero no nulo si en el futuro se soportan reembolsos parciales. El riesgo concreto y ya confirmado es: (a) un reintento de red genuino (timeout del lado de este servicio, mientras el refund sí se creó en Stripe) no es seguro de reintentar sin `idempotencyKey`, y (b) dos administradores (o un doble clic) pueden ambos disparar `stripe.refunds.create` para el mismo cargo.
-- **Evidencia**: `tests/routes/pagos.reembolso.test.ts:147` (dos llamadas concurrentes al service, conteo de llamadas reales a `stripe.refunds.create` impreso como evidencia en el log de test); `tests/routes/pagos.reembolso.test.ts:177` (confirma que no se pasa `idempotencyKey`).
-- **Estado de la corrección**: **pendiente de decisión humana**. Requiere generar y persistir una `idempotencyKey` por intento de reembolso (¿por `compraId`? ¿por click del admin?) y decidir si además se agrega un lock optimista/pesimista sobre `Compra` — cambio de diseño fuera del alcance de "solo pruebas".
+- **Dónde (antes del fix)**: `src/services/pagoService.ts` — `reembolsarCompra`, la llamada `stripe.refunds.create({ payment_intent: ... })` (sin segundo argumento de `requestOptions`).
+- **Qué pasaba**: a diferencia de `crearIntentoPago`, que sí pasa `idempotencyKey` a `stripe.paymentIntents.create` como "doble seguro" documentado en el propio código, `reembolsarCompra` no tenía un mecanismo equivalente. Además, el chequeo `compra.estado !== "pagada"` (lectura) y el `updateMany` a `"reembolsada"` (escritura, tras llamar a Stripe) no estaban protegidos por ningún lock: dos requests concurrentes al mismo `compraId` podían ambas leer `"pagada"` antes de que cualquiera escribiera, y ambas terminaban llamando a `stripe.refunds.create`.
+- **Impacto real (antes del fix)**: el propio saldo de Stripe evitaba que se reembolsara más del monto ya cobrado, así que el riesgo de pérdida de dinero real era bajo, pero no nulo si en el futuro se soportan reembolsos parciales. El riesgo concreto: (a) un reintento de red genuino (timeout del lado de este servicio, mientras el refund sí se creó en Stripe) no era seguro de reintentar sin `idempotencyKey`, y (b) dos administradores (o un doble clic) podían ambos disparar `stripe.refunds.create` para el mismo cargo.
+- **Corrección aplicada**: `idempotencyKey` **determinística por `PaymentIntent`** (`` `refund_${compra.stripePaymentIntentId}` ``), no aleatoria por request — mismo principio que el "doble seguro" ya usado en `crearIntentoPago`, pero sin necesitar un valor generado por el cliente: un reembolso es siempre "todo o nada" para el grupo completo que comparte ese intent, así que cualquier llamada (reintento de red o dos requests concurrentes) para el mismo intent debe resolver al mismo refund real en Stripe, nunca a uno nuevo. Esto no requiere cambio de esquema ni ningún lock a nivel de fila.
+  - Si dos requests concurrentes llegan a Stripe casi al mismo instante con la misma clave, Stripe puede rechazar a la que llega segunda mientras la primera sigue en vuelo (error de idempotencia), en vez de esperarla. Para ese caso puntual, el `catch` de `reembolsarCompra` ahora vuelve a consultar el grupo en BD antes de traducir el error: si ya quedó `"reembolsada"` (la otra request ganó), devuelve ese resultado real en vez de un 502 engañoso para quien solo perdió la carrera por una fracción de segundo.
+- **Evidencia (re-ejecutada después del fix)**: `tests/routes/pagos.reembolso.test.ts:128` (concurrencia vía HTTP real, toda llamada a Stripe usa la misma clave); `tests/routes/pagos.reembolso.test.ts:149` (dos llamadas directas al service en paralelo, misma clave determinística, grupo termina `reembolsada`); `tests/routes/pagos.reembolso.test.ts:173` (confirma que la clave se pasa y es determinística por intent); `tests/routes/pagos.reembolso.test.ts:190` (reproducción determinística del rechazo por conflicto de idempotencia → resultado exitoso, no 502). `npm test` completo → 76/76 PASS, corrida el 2026-09-22 después de aplicar el fix, 3+ corridas consecutivas sin flakiness.
+- **Estado de la corrección**: **CORREGIDO y verificado** (suite completa vuelta a correr después del cambio antes de marcarlo resuelto).
 
 ### P2-1 — `paqueteIds` con el mismo id repetido cobra el paquete dos veces, sin distinguir "carrito con 2 unidades" de un doble-envío accidental
 
@@ -187,6 +190,6 @@ Fuente de verdad de esta ronda de pruebas (no las conversaciones ni el chat que 
 
 - No se llamó a la API real de Stripe en ningún momento (todo mockeado con `vi.mock`).
 - No se commiteó ninguna clave real de Stripe ni token JWT real; `tests/setup/testEnv.ts` usa únicamente valores dummy (`sk_test_dummy_no_se_llama_nunca`, etc.).
-- No se modificó `prisma/schema.prisma` ni se generaron migraciones nuevas, ni siquiera para corregir P1-1: la estrategia elegida (espera con reintentos cortos) evita necesitar una constraint única o un cambio de esquema. El único cambio de infraestructura de pruebas es el stub `public.usuario` creado en tiempo de test dentro del contenedor efímero (`tests/setup/globalSetup.ts`), no en el schema del servicio.
-- No se aplicaron los fixes de P1-2 ni P2-1: siguen siendo cambios de diseño (estrategia de idempotencia/locking sobre reembolsos, o decisión de producto sobre `paqueteIds` duplicados), no parches mecánicos, y quedan documentados aquí para decisión humana en vez de "resueltos" sin la revisión correspondiente.
-- P1-3 y P1-1 sí se corrigieron dentro de esta tarea: P1-3 porque era una validación defensiva mecánica (formato de id + no confiar en errores no reconocidos) sin ambigüedad de diseño, y P1-1 porque, aunque sí implicaba elegir una estrategia de concurrencia, había una opción (reintentar con backoff corto) que no requería cambio de esquema ni mantener una transacción de BD abierta durante una llamada de red a Stripe — en ambos casos se volvió a correr toda la suite después del cambio antes de marcarlos como resueltos.
+- No se modificó `prisma/schema.prisma` ni se generaron migraciones nuevas, ni siquiera para corregir P1-1 o P1-2: ambas estrategias elegidas (espera con reintentos cortos; `idempotencyKey` determinística por `PaymentIntent`) evitan necesitar una constraint única o un cambio de esquema. El único cambio de infraestructura de pruebas es el stub `public.usuario` creado en tiempo de test dentro del contenedor efímero (`tests/setup/globalSetup.ts`), no en el schema del servicio.
+- No se aplicó el fix de P2-1: sigue siendo una decisión de producto (¿`paqueteIds` duplicados es "comprar 2 unidades" o un error de doble-envío?), no algo que este servicio pueda resolver por sí solo sin esa definición, y queda documentado aquí para decisión humana en vez de "resuelto" sin la revisión correspondiente.
+- P1-3, P1-1 y P1-2 sí se corrigieron dentro de esta tarea: P1-3 porque era una validación defensiva mecánica (formato de id + no confiar en errores no reconocidos) sin ambigüedad de diseño; P1-1 y P1-2 porque, aunque ambos implicaban elegir una estrategia de concurrencia, en los dos casos había una opción (backoff corto; `idempotencyKey` determinística) que no requería cambio de esquema ni mantener una transacción de BD abierta durante una llamada de red a Stripe — en los tres casos se volvió a correr toda la suite después del cambio antes de marcarlos como resueltos.

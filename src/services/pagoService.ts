@@ -483,14 +483,41 @@ export async function reembolsarCompra(compraId: string): Promise<ReembolsoRespo
     throw new ValidacionError("El carrito tiene compras en un estado inconsistente para reembolsar");
   }
 
+  // HALLAZGO P1-2 (corregido): a diferencia de crearIntentoPago, que pasa un
+  // idempotencyKey a Stripe como "doble seguro" documentado, aqui no se
+  // pasaba ninguno -- un reintento de red genuino (timeout de este lado
+  // mientras el refund si se creaba en Stripe), o dos requests concurrentes
+  // sobre la misma compra, podian terminar llamando dos veces a
+  // stripe.refunds.create para el mismo cargo. La clave es deterministica
+  // por PaymentIntent (no aleatoria por request): un reembolso es siempre
+  // "todo o nada" para el grupo completo que comparte ese intent, asi que
+  // cualquier llamada -- reintento o concurrente -- para el mismo intent
+  // debe resolver al mismo refund real en Stripe, nunca a uno nuevo.
+  const idempotencyKey = `refund_${compra.stripePaymentIntentId}`;
+
   try {
-    const refund = await stripe.refunds.create({ payment_intent: compra.stripePaymentIntentId! });
+    const refund = await stripe.refunds.create({ payment_intent: compra.stripePaymentIntentId! }, { idempotencyKey });
     await prisma.compra.updateMany({
       where: { id: { in: grupo.map((c) => c.id) } },
       data: { estado: "reembolsada" },
     });
     return { compraId: compra.id, estado: "reembolsada", montoReembolsadoCentavos: refund.amount };
   } catch (e) {
+    // Si dos requests concurrentes llegan a Stripe casi al mismo tiempo con
+    // la misma idempotencyKey, Stripe puede rechazar a la que llega segunda
+    // mientras la primera todavia esta en vuelo, en vez de esperarla. Antes
+    // de traducir eso como un error, se revisa si la otra request ya
+    // termino y dejo el grupo reembolsado -- en ese caso se devuelve el
+    // resultado real en vez de un 502 enganoso para quien solo perdio la
+    // carrera por una fraccion de segundo.
+    const grupoActual = await prisma.compra.findMany({ where: { stripePaymentIntentId: compra.stripePaymentIntentId } });
+    if (grupoActual.length > 0 && grupoActual.every((c) => c.estado === "reembolsada")) {
+      return {
+        compraId: compra.id,
+        estado: "reembolsada",
+        montoReembolsadoCentavos: grupoActual.reduce((suma, c) => suma + c.montoCentavos, 0),
+      };
+    }
     throw traducirErrorStripe(e, `reembolsar la compra ${compraId}`);
   }
 }
