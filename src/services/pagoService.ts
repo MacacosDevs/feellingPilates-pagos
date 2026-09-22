@@ -397,6 +397,30 @@ async function marcarComoFallida(intent: Stripe.PaymentIntent): Promise<void> {
   });
 }
 
+// Si el usuario ya tiene una compra vigente (pagada, sin expirar) en una
+// categoria que esta nueva compra tambien cubre, la nueva vigencia arranca
+// donde termina la vigente en vez de desde "ahora" -- comprar 2 paquetes de
+// 30 dias da 60 dias consecutivos, no dos ventanas de 30 dias superpuestas.
+// Un combo cuenta para pilates y bacu_fit a la vez (mismo criterio que
+// obtenerPaquetesActivos): si hay vigencias distintas en cada categoria, se
+// apila sobre la que este mas lejos, para no dejar hueco de cobertura en
+// ninguna de las dos.
+async function calcularFechaExpiracion(usuarioId: string, paquete: { categoria: string; vigenciaDias: number }): Promise<Date> {
+  const ahora = new Date();
+  const categoriasCubiertas = paquete.categoria === "combo" ? ["pilates", "bacu_fit"] : [paquete.categoria];
+
+  const vigentes = await prisma.compra.findMany({
+    where: { usuarioId, estado: "pagada", fechaExpiracion: { gt: ahora } },
+    include: { paquete: true },
+  });
+
+  const expiracionMasLejana = vigentes
+    .filter((c) => categoriasCubiertas.includes(c.paquete.categoria) || c.paquete.categoria === "combo")
+    .reduce((maxima, c) => Math.max(maxima, c.fechaExpiracion!.getTime()), ahora.getTime());
+
+  return new Date(expiracionMasLejana + paquete.vigenciaDias * 86_400_000);
+}
+
 async function aplicarPagada(compraId: string, estadoActual: EstadoCompra, charge: Stripe.Charge | null): Promise<void> {
   if (estadoActual === "pagada") {
     return;
@@ -404,12 +428,13 @@ async function aplicarPagada(compraId: string, estadoActual: EstadoCompra, charg
   const compra = await prisma.compra.findUniqueOrThrow({ where: { id: compraId }, include: { paquete: true } });
   const balanceTx =
     charge?.balance_transaction && typeof charge.balance_transaction !== "string" ? charge.balance_transaction : null;
+  const fechaExpiracion = await calcularFechaExpiracion(compra.usuarioId, compra.paquete);
 
   await prisma.compra.update({
     where: { id: compraId },
     data: {
       estado: "pagada",
-      fechaExpiracion: new Date(Date.now() + compra.paquete.vigenciaDias * 86_400_000),
+      fechaExpiracion,
       tarjetaMarca: charge?.payment_method_details?.card?.brand ?? null,
       tarjetaUltimosDigitos: charge?.payment_method_details?.card?.last4 ?? null,
       reciboUrl: charge?.receipt_url ?? null,

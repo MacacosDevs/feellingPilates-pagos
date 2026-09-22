@@ -2,7 +2,7 @@
 
 Fuente de verdad de esta ronda de pruebas (no las conversaciones ni el chat que la generó). Corresponde al prompt "Pruebas de errores del microservicio de pagos" ejecutado sobre `feellingPilates-pagos` en la rama `AlanGP2001/lungfish`.
 
-Última corrida verificada: 2026-09-22, `npm test` → **76/76 PASS** (69 del prompt original + 5 al corregir P1-3 + 1 neto al corregir P1-1 + 1 neto al corregir P1-2), 3+ corridas consecutivas sin flakiness (ver notas de infraestructura al final).
+Última corrida verificada: 2026-09-22, `npm test` → **82/82 PASS** (69 del prompt original + 5 al corregir P1-3 + 1 neto al corregir P1-1 + 1 neto al corregir P1-2 + 6 al corregir P1-4, hallazgo descubierto al aclarar P2-1 con el dueño del producto), 3+ corridas consecutivas sin flakiness (ver notas de infraestructura al final).
 
 ## Infraestructura de pruebas
 
@@ -101,16 +101,22 @@ Fuente de verdad de esta ronda de pruebas (no las conversaciones ni el chat que 
 | 33b | `payment_intent.succeeded` marca pagada y guarda comisión/monto neto/tarjeta | PASS | `tests/routes/pagos.webhook.test.ts:62` |
 | 34 | `payment_intent.succeeded` recibido 2 veces → idempotente, no duplica | PASS | `tests/routes/pagos.webhook.test.ts:87` |
 | 35 | `charges.retrieve` (balance_transaction) falla → sigue marcando pagada sin comisión/neto | PASS | `tests/routes/pagos.webhook.test.ts:116` |
-| 36 | `payment_intent.payment_failed` guarda `ultimoErrorCodigo`/`ultimoErrorMensaje` | PASS | `tests/routes/pagos.webhook.test.ts:136` |
-| 36b | `payment_intent.payment_failed` sin compra previa → no lanza | PASS | `tests/routes/pagos.webhook.test.ts:155` |
-| 37 | `charge.refunded` sin compras asociadas → no falla | PASS | `tests/routes/pagos.webhook.test.ts:164` |
-| 37b | `charge.refunded` sobre compra ya reembolsada → no falla, no reescribe | PASS | `tests/routes/pagos.webhook.test.ts:171` |
-| 37c | `charge.refunded` sobre compra pagada (reembolso hecho fuera del endpoint) → marca reembolsada | PASS | `tests/routes/pagos.webhook.test.ts:186` |
-| 38 | `charge.dispute.created` sin `payment_intent` → retorna sin error | PASS | `tests/routes/pagos.webhook.test.ts:202` |
-| 38b | `charge.dispute.created` marca `en_disputa` | PASS | `tests/routes/pagos.webhook.test.ts:209` |
-| 39 | `charge.dispute.closed` con `status: "won"` → vuelve a `pagada`, solo afecta `en_disputa` | PASS | `tests/routes/pagos.webhook.test.ts:225` |
-| 39b | `charge.dispute.closed` con otro status → `reembolsada` | PASS | `tests/routes/pagos.webhook.test.ts:240` |
-| 39c | `charge.dispute.closed` no afecta compras con el mismo intent que no estén `en_disputa` | PASS | `tests/routes/pagos.webhook.test.ts:253` |
+| 35b | 2 paquetes iguales en el mismo carrito → vigencia se apila (30+30=60 días consecutivos) | PASS ([CORREGIDO] **Hallazgo P1-4**) | `tests/routes/pagos.webhook.test.ts:140` |
+| 35c | Compra con vigencia previa en la misma categoría → la nueva extiende desde la fecha de expiración vigente, no desde ahora | PASS ([CORREGIDO] **Hallazgo P1-4**) | `tests/routes/pagos.webhook.test.ts:159` |
+| 35d | Sin vigencia previa (o solo una ya vencida) → arranca desde ahora, sin cambios | PASS | `tests/routes/pagos.webhook.test.ts:181` |
+| 35e | Un combo se apila sobre la vigencia más lejana entre pilates y bacu_fit | PASS ([CORREGIDO] **Hallazgo P1-4**) | `tests/routes/pagos.webhook.test.ts:202` |
+| 35f | Vigencia de pilates no afecta a una compra nueva de bacu_fit (categorías distintas, sin combo) | PASS | `tests/routes/pagos.webhook.test.ts:222` |
+| 35g | `obtenerPaquetesActivos` refleja la vigencia apilada como una sola entrada de 60 días | PASS | `tests/routes/pagos.webhook.test.ts:244` |
+| 36 | `payment_intent.payment_failed` guarda `ultimoErrorCodigo`/`ultimoErrorMensaje` | PASS | `tests/routes/pagos.webhook.test.ts:266` |
+| 36b | `payment_intent.payment_failed` sin compra previa → no lanza | PASS | `tests/routes/pagos.webhook.test.ts:285` |
+| 37 | `charge.refunded` sin compras asociadas → no falla | PASS | `tests/routes/pagos.webhook.test.ts:294` |
+| 37b | `charge.refunded` sobre compra ya reembolsada → no falla, no reescribe | PASS | `tests/routes/pagos.webhook.test.ts:301` |
+| 37c | `charge.refunded` sobre compra pagada (reembolso hecho fuera del endpoint) → marca reembolsada | PASS | `tests/routes/pagos.webhook.test.ts:316` |
+| 38 | `charge.dispute.created` sin `payment_intent` → retorna sin error | PASS | `tests/routes/pagos.webhook.test.ts:332` |
+| 38b | `charge.dispute.created` marca `en_disputa` | PASS | `tests/routes/pagos.webhook.test.ts:339` |
+| 39 | `charge.dispute.closed` con `status: "won"` → vuelve a `pagada`, solo afecta `en_disputa` | PASS | `tests/routes/pagos.webhook.test.ts:355` |
+| 39b | `charge.dispute.closed` con otro status → `reembolsada` | PASS | `tests/routes/pagos.webhook.test.ts:370` |
+| 39c | `charge.dispute.closed` no afecta compras con el mismo intent que no estén `en_disputa` | PASS | `tests/routes/pagos.webhook.test.ts:383` |
 
 ### Job de reconciliación (`src/jobs/reconciliacion.ts`)
 
@@ -136,7 +142,7 @@ Fuente de verdad de esta ronda de pruebas (no las conversaciones ni el chat que 
 | 50 | Body JSON malformado en `POST intento` → 400 con mensaje de sintaxis (comportamiento correcto ya existente, ahora fijado con test) | PASS | `tests/routes/pagos.manejoErrores.test.ts` |
 | 51 | Un error no anticipado por este servicio (bug, excepción de terceros) → 500 genérico, sin filtrar el mensaje original | PASS | `tests/routes/pagos.manejoErrores.test.ts` |
 
-**Total combinado: 76/76 PASS.**
+**Total combinado: 82/82 PASS.**
 
 ## Hallazgos
 
@@ -162,13 +168,31 @@ Fuente de verdad de esta ronda de pruebas (no las conversaciones ni el chat que 
 - **Evidencia (re-ejecutada después del fix)**: `tests/routes/pagos.reembolso.test.ts:128` (concurrencia vía HTTP real, toda llamada a Stripe usa la misma clave); `tests/routes/pagos.reembolso.test.ts:149` (dos llamadas directas al service en paralelo, misma clave determinística, grupo termina `reembolsada`); `tests/routes/pagos.reembolso.test.ts:173` (confirma que la clave se pasa y es determinística por intent); `tests/routes/pagos.reembolso.test.ts:190` (reproducción determinística del rechazo por conflicto de idempotencia → resultado exitoso, no 502). `npm test` completo → 76/76 PASS, corrida el 2026-09-22 después de aplicar el fix, 3+ corridas consecutivas sin flakiness.
 - **Estado de la corrección**: **CORREGIDO y verificado** (suite completa vuelta a correr después del cambio antes de marcarlo resuelto).
 
-### P2-1 — `paqueteIds` con el mismo id repetido cobra el paquete dos veces, sin distinguir "carrito con 2 unidades" de un doble-envío accidental
+### P2-1 — [ACLARADO] `paqueteIds` con el mismo id repetido cobra el paquete dos veces — confirmado como comportamiento deseado, no un bug
 
-- **Dónde**: `src/services/pagoService.ts:82-88` (chequeo `paquetes.length !== new Set(paqueteIds).size`).
-- **Qué pasa**: con `paqueteIds: [id, id]`, la consulta `findMany({ where: { id: { in: paqueteIds } } })` devuelve el paquete **una sola vez** (`paquetes.length === 1`), y `new Set(paqueteIds).size` también es `1` — la comprobación no detecta el duplicado. El código sigue adelante y crea una `Compra` por cada entrada del array (`paqueteIds.map(...)`), así que el usuario termina con 2 `Compra` y se le cobra 2 veces el precio del paquete.
-- **Impacto real**: no es necesariamente incorrecto (podría ser la forma de comprar 2 unidades del mismo paquete para el mismo carrito), pero tampoco hay una intención explícita de "cantidad" en el modelo de datos ni en el request — así que un reintento accidental del lado del cliente (ej. un doble submit del carrito, no protegido por `idempotencyKey` porque esa clave sí se generó pero el propio array de paqueteIds llegó duplicado desde el frontend) resulta en un cobro real de 2x sin ningún aviso ni validación adicional.
-- **Evidencia**: `tests/routes/pagos.intento.test.ts:94` (confirma 2 `Compra` creadas y `amount` = precio × 2).
-- **Estado de la corrección**: **pendiente de decisión de producto**, no solo de ingeniería — hay que decidir si esto es una funcionalidad válida (comprar N unidades) o si se debe deduplicar `paqueteIds` antes de procesar el carrito.
+- **Dónde**: `src/services/pagoService.ts` (chequeo `paquetes.length !== new Set(paqueteIds).size` en `crearIntentoPago`).
+- **Qué pasa**: con `paqueteIds: [id, id]`, la consulta `findMany({ where: { id: { in: paqueteIds } } })` devuelve el paquete **una sola vez** (`paquetes.length === 1`), y `new Set(paqueteIds).size` también es `1` — la comprobación no detecta el duplicado. El código crea una `Compra` por cada entrada del array (`paqueteIds.map(...)`), así que el usuario termina con 2 `Compra` y se le cobra 2 veces el precio del paquete.
+- **Decisión de producto (2026-09-22)**: comprar más de una unidad del mismo paquete en un mismo carrito **es un flujo válido e intencional** — no hay que deduplicar `paqueteIds` ni rechazarlo. No se necesita ningún cambio de código para esta parte: el cobro doble es correcto porque el usuario pidió dos paquetes.
+- **Lo que sí resultó ser un bug real al verificar esta decisión**: aunque el cobro doble era correcto, el *beneficio* no se estaba duplicando en absoluto — ver **Hallazgo P1-4** más abajo, descubierto y corregido a partir de esta misma conversación.
+- **Evidencia**: `tests/routes/pagos.intento.test.ts:94` (sigue confirmando 2 `Compra` creadas y `amount` = precio × 2 — comportamiento correcto, no un hallazgo).
+- **Estado**: **CERRADO** (aclarado por decisión de producto, no requiere cambio de código).
+
+### P1-4 — [CORREGIDO] La vigencia de compras adicionales en la misma categoría no se sumaba: el cliente pagaba 2x pero solo recibía el beneficio de 1x
+
+- **Cómo se encontró**: al aclarar P2-1, el dueño del producto confirmó que comprar 2 paquetes iguales es intencional y que "obviamente" la vigencia debería sumarse (30+30 = 60 días consecutivos). Verificar esa afirmación contra el código reveló que **no era cierto**.
+- **Dónde (antes del fix)**: `src/services/pagoService.ts` — `aplicarPagada` (compartida por el webhook `payment_intent.succeeded` y el job de reconciliación) y `obtenerPaquetesActivos`.
+- **Qué pasaba**:
+  1. `aplicarPagada` calculaba `fechaExpiracion` siempre como `Date.now() + paquete.vigenciaDias * 86_400_000` — **sin mirar si el usuario ya tenía otra compra vigente**. Dos compras del mismo paquete de 30 días, confirmadas casi al mismo tiempo, terminaban con fechas de expiración casi idénticas (~30 días desde hoy cada una), no 60 días combinados.
+  2. `obtenerPaquetesActivos` ("mis paquetes activos") solo devuelve **una** compra por categoría — la de expiración más lejana — y descarta las demás (esto está documentado a propósito en el comentario del código: *"no existe todavía un sistema de reservas que descuente clases usadas... 'paquete activo' es solo el más reciente vigente"*). Como ninguna de las dos compras aportaba tiempo extra, la segunda compra pagada **no le daba absolutamente nada** al usuario: ni más días, ni más clases (tampoco existe un campo de "cantidad de clases" en el modelo — `Paquete` solo tiene `vigenciaDias`, sin contador de clases).
+- **Impacto real (antes del fix)**: el cliente pagaba el doble del precio y su acceso seguía expirando prácticamente el mismo día que si hubiera comprado una sola unidad. Esto es dinero real pagado sin el beneficio correspondiente — un problema de negocio/confianza con el cliente, no solo un detalle técnico.
+- **Corrección aplicada**: nueva función `calcularFechaExpiracion(usuarioId, paquete)` en `src/services/pagoService.ts`, usada por `aplicarPagada` en vez del cálculo fijo:
+  - Busca las compras `pagada` y vigentes (`fechaExpiracion > ahora`) del usuario en las categorías que la nueva compra cubre (la propia categoría del paquete; si es `"combo"`, cubre `"pilates"` y `"bacu_fit"` a la vez — mismo criterio que ya usa `obtenerPaquetesActivos`).
+  - La nueva `fechaExpiracion` = `max(ahora, expiración vigente más lejana entre esas categorías) + paquete.vigenciaDias`. Si no hay ninguna vigente (o solo hay una ya vencida), el resultado es igual al comportamiento anterior (`ahora + vigenciaDias`).
+  - Un combo se apila sobre la más lejana entre pilates y bacu_fit (no sobre una fija), para no dejar un hueco de cobertura en ninguna de las dos categorías cuando sus vigencias vigentes difieren.
+  - Como el webhook procesa las `Compra` de un mismo carrito **secuencialmente** (`for...of` con `await`, no en paralelo), comprar 2 paquetes iguales en un mismo checkout ya encadena correctamente: la primera se confirma con `ahora+30`, y para cuando se procesa la segunda, la primera ya quedó `"pagada"` con esa fecha, así que la segunda se apila sobre ella (`+30` más = 60 días desde `ahora`).
+- **Fuera de alcance de este fix (documentado, no bloqueante)**: si dos compras de **checkouts completamente distintos** (dos `PaymentIntent` separados) se confirman casi al mismo instante por dos webhooks concurrentes, existe la misma clase de ventana de carrera que P1-1/P1-2 (ambas podrían leer "sin vigencia previa" y calcular desde `ahora` en vez de apilarse entre sí). Es un escenario mucho más raro en la práctica (requiere que el usuario complete dos checkouts separados casi al mismo segundo) y su peor consecuencia es cosmética (falta apilar unos segundos de superposición, no pérdida de dinero ni de acceso), así que se deja como limitación conocida en vez de agregar un lock para esto ahora.
+- **Evidencia (re-ejecutada después del fix)**: 6 tests nuevos en `tests/routes/pagos.webhook.test.ts` (dentro de `describe("la vigencia se apila entre compras (no se pisa)")`, línea 139): mismo carrito apila 30+30=60; compra nueva extiende desde la vigente; sin vigencia previa arranca desde ahora; combo se apila sobre la más lejana; categorías distintas no se mezclan sin combo; `obtenerPaquetesActivos` refleja el total apilado. `npm test` completo → 82/82 PASS, corrida el 2026-09-22 después de aplicar el fix.
+- **Estado de la corrección**: **CORREGIDO y verificado** (suite completa vuelta a correr después del cambio antes de marcarlo resuelto).
 
 ### P1-3 — [CORREGIDO] `compraId`/`paqueteId` con formato inválido llegaban sin validar a Prisma, que filtraba su error interno (ruta de archivo, línea, stack) al cliente en la respuesta 500
 
@@ -190,6 +214,7 @@ Fuente de verdad de esta ronda de pruebas (no las conversaciones ni el chat que 
 
 - No se llamó a la API real de Stripe en ningún momento (todo mockeado con `vi.mock`).
 - No se commiteó ninguna clave real de Stripe ni token JWT real; `tests/setup/testEnv.ts` usa únicamente valores dummy (`sk_test_dummy_no_se_llama_nunca`, etc.).
-- No se modificó `prisma/schema.prisma` ni se generaron migraciones nuevas, ni siquiera para corregir P1-1 o P1-2: ambas estrategias elegidas (espera con reintentos cortos; `idempotencyKey` determinística por `PaymentIntent`) evitan necesitar una constraint única o un cambio de esquema. El único cambio de infraestructura de pruebas es el stub `public.usuario` creado en tiempo de test dentro del contenedor efímero (`tests/setup/globalSetup.ts`), no en el schema del servicio.
-- No se aplicó el fix de P2-1: sigue siendo una decisión de producto (¿`paqueteIds` duplicados es "comprar 2 unidades" o un error de doble-envío?), no algo que este servicio pueda resolver por sí solo sin esa definición, y queda documentado aquí para decisión humana en vez de "resuelto" sin la revisión correspondiente.
-- P1-3, P1-1 y P1-2 sí se corrigieron dentro de esta tarea: P1-3 porque era una validación defensiva mecánica (formato de id + no confiar en errores no reconocidos) sin ambigüedad de diseño; P1-1 y P1-2 porque, aunque ambos implicaban elegir una estrategia de concurrencia, en los dos casos había una opción (backoff corto; `idempotencyKey` determinística) que no requería cambio de esquema ni mantener una transacción de BD abierta durante una llamada de red a Stripe — en los tres casos se volvió a correr toda la suite después del cambio antes de marcarlos como resueltos.
+- No se modificó `prisma/schema.prisma` ni se generaron migraciones nuevas para ninguno de los 4 hallazgos corregidos: todas las estrategias elegidas (espera con reintentos cortos para P1-1; `idempotencyKey` determinística por `PaymentIntent` para P1-2; apilar sobre la vigencia existente para P1-4) evitan necesitar una constraint única o un cambio de esquema. El único cambio de infraestructura de pruebas es el stub `public.usuario` creado en tiempo de test dentro del contenedor efímero (`tests/setup/globalSetup.ts`), no en el schema del servicio.
+- P2-1 se cerró sin cambio de código: era una decisión de producto (¿`paqueteIds` duplicados es "comprar 2 unidades" o un error de doble-envío?), y el dueño del producto confirmó que es "comprar 2 unidades" intencional — el comportamiento de cobro doble ya era correcto.
+- Esa misma aclaración destapó un hallazgo nuevo y más importante (P1-4): aunque el cobro doble era correcto, el beneficio (vigencia) no se sumaba. Ningún hallazgo se cerró por asumir intención sin verificar contra el código real.
+- P1-1, P1-2, P1-3 y P1-4 se corrigieron dentro de esta tarea: P1-3 porque era una validación defensiva mecánica sin ambigüedad de diseño; P1-1, P1-2 y P1-4 porque, aunque cada uno implicaba una decisión (de concurrencia o de negocio), en los tres casos había una estrategia sin cambio de esquema ni necesidad de mantener una transacción de BD abierta durante una llamada de red a Stripe. En los 4 casos se volvió a correr toda la suite después del cambio antes de marcarlos como resueltos.
