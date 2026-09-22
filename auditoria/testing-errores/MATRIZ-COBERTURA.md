@@ -2,7 +2,7 @@
 
 Fuente de verdad de esta ronda de pruebas (no las conversaciones ni el chat que la generó). Corresponde al prompt "Pruebas de errores del microservicio de pagos" ejecutado sobre `feellingPilates-pagos` en la rama `AlanGP2001/lungfish`.
 
-Última corrida verificada: 2026-09-21, `npm test` → **69/69 PASS**, 3 corridas consecutivas sin flakiness (ver notas de infraestructura al final).
+Última corrida verificada: 2026-09-22, `npm test` → **74/74 PASS** (69 del prompt original + 5 agregados al confirmar y corregir el hallazgo P1-3), 3 corridas consecutivas sin flakiness (ver notas de infraestructura al final).
 
 ## Infraestructura de pruebas
 
@@ -122,7 +122,19 @@ Fuente de verdad de esta ronda de pruebas (no las conversaciones ni el chat que 
 | 45 | Intent en otro estado, fuera de la ventana de abandono → se cancela | PASS | `tests/jobs/reconciliacion.test.ts:86` |
 | 46 | Webhook y cron casi simultáneos sobre la misma compra → sin estado inconsistente (guard de `aplicarPagada`) | PASS | `tests/jobs/reconciliacion.test.ts:106` |
 
-**Total: 69/69 escenarios ejecutados y verificados como PASS.** "PASS" aquí significa "el test corrió y confirma el comportamiento documentado" — en 3 casos (marcados arriba) el comportamiento confirmado es en sí mismo un hallazgo (ver siguiente sección), no una validación de que todo está bien.
+**Total: 69/69 escenarios del prompt original ejecutados y verificados como PASS.** "PASS" aquí significa "el test corrió y confirma el comportamiento documentado" — en 3 casos (marcados arriba) el comportamiento confirmado es en sí mismo un hallazgo (ver siguiente sección), no una validación de que todo está bien.
+
+### Escenarios adicionales (fuera del prompt original, agregados al validar "¿son todos los errores posibles?")
+
+| # | Escenario | Estado | Evidencia |
+|---|---|---|---|
+| 47 | `GET estado-en-vivo` con `compraId` no-UUID → 400 limpio, sin detalle interno de Prisma | PASS | `tests/routes/pagos.manejoErrores.test.ts` |
+| 48 | `POST reembolso` con `compraId` no-UUID → 400 limpio, sin detalle interno de Prisma | PASS | `tests/routes/pagos.manejoErrores.test.ts` |
+| 49 | `POST paquetes/intento` con un `paqueteId` no-UUID → 400 limpio, sin detalle interno de Prisma | PASS | `tests/routes/pagos.manejoErrores.test.ts` |
+| 50 | Body JSON malformado en `POST intento` → 400 con mensaje de sintaxis (comportamiento correcto ya existente, ahora fijado con test) | PASS | `tests/routes/pagos.manejoErrores.test.ts` |
+| 51 | Un error no anticipado por este servicio (bug, excepción de terceros) → 500 genérico, sin filtrar el mensaje original | PASS | `tests/routes/pagos.manejoErrores.test.ts` |
+
+**Total combinado: 74/74 PASS.**
 
 ## Hallazgos
 
@@ -150,9 +162,26 @@ Fuente de verdad de esta ronda de pruebas (no las conversaciones ni el chat que 
 - **Evidencia**: `tests/routes/pagos.intento.test.ts:94` (confirma 2 `Compra` creadas y `amount` = precio × 2).
 - **Estado de la corrección**: **pendiente de decisión de producto**, no solo de ingeniería — hay que decidir si esto es una funcionalidad válida (comprar N unidades) o si se debe deduplicar `paqueteIds` antes de procesar el carrito.
 
+### P1-3 — [CORREGIDO] `compraId`/`paqueteId` con formato inválido llegaban sin validar a Prisma, que filtraba su error interno (ruta de archivo, línea, stack) al cliente en la respuesta 500
+
+- **Dónde (antes del fix)**: `src/services/pagoService.ts` — `obtenerEstadoEnVivo` (línea 232 original), `reembolsarCompra` (línea 428 original) y `crearIntentoPago` (línea 82) pasaban el id recibido del cliente directo a una columna `@db.Uuid` de Prisma sin validar su formato. `src/middleware/errores.ts` reenviaba `error.message` de **cualquier** error (no solo los construidos a propósito por este servicio) en el body de la respuesta.
+- **Qué pasaba**: un `compraId` o `paqueteId` con formato no-UUID (ej. `no-es-un-uuid`) hacía que Prisma lanzara `PrismaClientKnownRequestError` (código `P2023`), cuyo `.message` incluye la ruta absoluta del archivo, el número de línea y parte del stack de la query. Como ese error no tiene `.status`, caía al 500 genérico — pero el body de esa respuesta 500 contenía el mensaje completo de Prisma, no un `"Error interno"` genérico. Confirmado en vivo antes del fix:
+  ```
+  GET /api/pagos/compras/no-es-un-uuid/estado-en-vivo
+  → 500 {"error":"\nInvalid `prisma.compra.findUnique()` invocation in\nC:/.../pagoService.ts:215:38\n..."}
+  ```
+- **Alcance real del bug**: no era exclusivo de `compraId` en estado-en-vivo — el mismo patrón (id de usuario no validado → Prisma → leak) afectaba también a `reembolsarCompra` y a cada entrada de `paqueteIds` en `crearIntentoPago`. La causa raíz era más amplia todavía: `manejadorErrores` confiaba en `.message`/`.status` de **cualquier** error no anticipado, así que cualquier futuro error interno no relacionado con UUIDs (otro bug, otra excepción de una librería) habría tenido el mismo problema.
+- **Corrección aplicada** (dos capas, no una sola):
+  1. `src/middleware/errores.ts` — `manejadorErrores` ahora solo confía en `.status`/`.message` de las 4 clases de error que este servicio construye a propósito (`ValidacionError`, `RecursoNoEncontradoError`, `NoAutorizadoError`, `ErrorPago`, ver `src/errores.ts`). Cualquier otro error no reconocido responde `500 {"error":"Error interno"}` sin filtrar su mensaje original (que sí se sigue logueando completo con `console.error` del lado del servidor). Se preserva como caso especial el error de parseo de JSON de `express.json()` (`type: "entity.parse.failed"`, `status: 400`, `expose: true`), porque ese mensaje es seguro de mostrar y le sirve al cliente para corregir su request.
+  2. `src/services/pagoService.ts` — se agregó `validarUuid()` (regex de formato UUID v4-agnóstico) y se llama antes de tocar Prisma en `obtenerEstadoEnVivo`, `reembolsarCompra` y por cada entrada de `paqueteIds` en `crearIntentoPago`, devolviendo un `400 ValidacionError` claro (`"compraId invalido"` / `"paqueteId invalido"`) en vez de depender solo del 500 genérico de respaldo.
+- **Evidencia (re-ejecutada después del fix, no antes)**: `tests/routes/pagos.manejoErrores.test.ts` — 5 tests, todos PASS: `npm test` completo → 74/74 PASS, corrida el 2026-09-22 después de aplicar ambos cambios.
+- **Severidad**: P1 (fuga de información interna — rutas de archivo del servidor, ORM usado, estructura de código — no P0 porque no expone datos de otro usuario ni permite bypass de auth).
+- **Estado de la corrección**: **CORREGIDO y verificado** (no autodeclarado sin volver a correr la prueba: se corrió `npm test` completo después del cambio, no solo el archivo nuevo).
+
 ## Qué no se hizo (según el alcance del prompt)
 
 - No se llamó a la API real de Stripe en ningún momento (todo mockeado con `vi.mock`).
 - No se commiteó ninguna clave real de Stripe ni token JWT real; `tests/setup/testEnv.ts` usa únicamente valores dummy (`sk_test_dummy_no_se_llama_nunca`, etc.).
 - No se modificó `prisma/schema.prisma` ni se generaron migraciones nuevas. El único cambio de infraestructura de pruebas es el stub `public.usuario` creado en tiempo de test dentro del contenedor efímero (`tests/setup/globalSetup.ts`), no en el schema del servicio.
 - No se aplicaron los fixes de P1-1, P1-2 ni P2-1: son cambios de diseño (estrategia de idempotencia/locking, o decisión de producto), no parches de una línea, y quedan documentados aquí para decisión humana en vez de "resueltos" sin la revisión correspondiente.
+- P1-3 sí se corrigió dentro de esta tarea porque, a diferencia de los otros tres, era una validación defensiva mecánica (formato de id + no confiar en errores no reconocidos) sin ambigüedad de diseño ni de producto — y se volvió a correr toda la suite después del cambio antes de marcarlo como resuelto.
