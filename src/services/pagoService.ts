@@ -1,7 +1,7 @@
 import type Stripe from "stripe";
 import { randomUUID } from "node:crypto";
 import { env } from "../config/env.js";
-import { ErrorPago, NoAutorizadoError, RecursoNoEncontradoError, ValidacionError } from "../errores.js";
+import { ErrorPago, NoAutorizadoError, RecursoNoEncontradoError, ServicioNoConfiguradoError, ValidacionError } from "../errores.js";
 import { prisma } from "../lib/prisma.js";
 import { stripe } from "../lib/stripe.js";
 
@@ -88,6 +88,9 @@ export async function crearIntentoPago(
   for (const paqueteId of paqueteIds) {
     validarUuid(paqueteId, "paqueteId");
   }
+  // Antes de crear filas Compra: sin Stripe configurado quedarian
+  // "pendiente" huerfanas, sin PaymentIntent, que nadie va a resolver.
+  exigirStripeConfigurado();
 
   if (idempotencyKey) {
     const existente = await reusarSiExiste(idempotencyKey);
@@ -332,7 +335,10 @@ export async function obtenerPayouts(): Promise<PayoutResponse[]> {
 export function construirEventoWebhook(payload: Buffer, firmaStripe: string): Stripe.Event {
   try {
     return stripe.webhooks.constructEvent(payload, firmaStripe, env.stripeWebhookSecret);
-  } catch {
+  } catch (e) {
+    if (e instanceof ServicioNoConfiguradoError) {
+      throw e;
+    }
     throw new ValidacionError("Firma de webhook de Stripe invalida");
   }
 }
@@ -554,6 +560,11 @@ export async function reembolsarCompra(compraId: string): Promise<ReembolsoRespo
 // el tiempo limite, se marca como abandonada (cancelada). Se llama desde el
 // cron job en src/jobs/reconciliacion.ts.
 export async function reconciliarComprasPendientes(): Promise<void> {
+  // Sin Stripe no hay contra que reconciliar; se evita un warning por cada
+  // compra pendiente cada 5 minutos.
+  if (!env.stripeSecretKey) {
+    return;
+  }
   const limiteAbandono = new Date(Date.now() - env.compraPendienteExpiraMinutos * 60_000);
   const pendientes = await prisma.compra.findMany({ where: { estado: "pendiente" } });
   for (const compra of pendientes) {
@@ -592,7 +603,11 @@ async function reconciliarUnaCompra(
 // Clasifica cualquier fallo de Stripe segun las categorias documentadas
 // (content error 4xx, network error, server error 5xx / indeterminado) para
 // que el backend principal reciba un origen claro en vez de un 500 generico.
-function traducirErrorStripe(e: unknown, accion: string): ErrorPago {
+function traducirErrorStripe(e: unknown, accion: string): ErrorPago | ServicioNoConfiguradoError {
+  // No es un fallo de Stripe: Stripe nunca se llamo (ver src/lib/stripe.ts).
+  if (e instanceof ServicioNoConfiguradoError) {
+    return e;
+  }
   const err = e as { type?: string; statusCode?: number; message?: string };
   console.error(`Stripe fallo al ${accion}:`, err);
 
@@ -607,6 +622,12 @@ function traducirErrorStripe(e: unknown, accion: string): ErrorPago {
     return new ErrorPago(`No se pudo ${accion}: error del lado de Stripe`, "stripe_server_error");
   }
   return new ErrorPago(`No se pudo ${accion}: ${err.message ?? "motivo desconocido"}`, "stripe_decline");
+}
+
+function exigirStripeConfigurado(): void {
+  if (!env.stripeSecretKey) {
+    throw new ServicioNoConfiguradoError("Stripe no esta configurado en este ambiente (falta STRIPE_SECRET_KEY)");
+  }
 }
 
 export function generarIdempotencyKey(): string {

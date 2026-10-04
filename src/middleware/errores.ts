@@ -1,13 +1,14 @@
 import type { NextFunction, Request, Response } from "express";
-import { ErrorPago, NoAutorizadoError, RecursoNoEncontradoError, ValidacionError } from "../errores.js";
+import { ErrorPago, NoAutorizadoError, RecursoNoEncontradoError, ServicioNoConfiguradoError, ValidacionError } from "../errores.js";
 
-type ErrorConocido = ValidacionError | RecursoNoEncontradoError | NoAutorizadoError | ErrorPago;
+type ErrorConocido = ValidacionError | RecursoNoEncontradoError | NoAutorizadoError | ServicioNoConfiguradoError | ErrorPago;
 
 function esErrorConocido(err: unknown): err is ErrorConocido {
   return (
     err instanceof ValidacionError ||
     err instanceof RecursoNoEncontradoError ||
     err instanceof NoAutorizadoError ||
+    err instanceof ServicioNoConfiguradoError ||
     err instanceof ErrorPago
   );
 }
