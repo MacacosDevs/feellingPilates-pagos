@@ -8,11 +8,12 @@ datasource db {
   schemas  = ["pagos"]
 }
 
-// Catalogo de precios (Pilates / Bacu Fit / combos). Sin relacion a otros
-// dominios, por eso se pudo mudar completo desde el backend principal.
+// Catalogo de precios. `categoria` (pilates / bacu_fit / combo) es el modelo
+// original; los paquetes nuevos de caja la dejan en null y declaran su
+// composicion por actividad en PaqueteActividad.
 model Paquete {
   id             String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
-  categoria      String   @db.VarChar(20)
+  categoria      String?  @db.VarChar(20)
   nombre         String   @db.VarChar(100)
   descripcion    String?  @db.VarChar(255)
   precioCentavos Int      @map("precio_centavos")
@@ -24,9 +25,28 @@ model Paquete {
   creadoEn       DateTime @default(now()) @map("creado_en") @db.Timestamptz
   actualizadoEn  DateTime @default(now()) @updatedAt @map("actualizado_en") @db.Timestamptz
 
-  compras Compra[]
+  compras     Compra[]
+  actividades PaqueteActividad[]
 
   @@map("paquete")
+  @@schema("pagos")
+}
+
+// Cuantas clases de cada actividad incluye un paquete. tipoActividadId apunta
+// a tipo_actividad.id en el schema "public" (catalogo del backend principal);
+// igual que usuarioId en Compra, la FK vive solo en el SQL de migracion.
+model PaqueteActividad {
+  id              String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  paqueteId       String   @map("paquete_id") @db.Uuid
+  tipoActividadId String   @map("tipo_actividad_id") @db.Uuid
+  cantidadClases  Int      @map("cantidad_clases")
+  creadoEn        DateTime @default(now()) @map("creado_en") @db.Timestamptz
+  actualizadoEn   DateTime @default(now()) @updatedAt @map("actualizado_en") @db.Timestamptz
+
+  paquete Paquete @relation(fields: [paqueteId], references: [id], onDelete: Cascade)
+
+  @@unique([paqueteId, tipoActividadId])
+  @@map("paquete_actividad")
   @@schema("pagos")
 }
 
@@ -64,9 +84,22 @@ model Compra {
   ultimoErrorCodigo     String?   @map("ultimo_error_codigo") @db.VarChar(100)
   ultimoErrorMensaje    String?   @map("ultimo_error_mensaje") @db.VarChar(500)
 
+  // Venta presencial en caja. metodoPago: stripe | efectivo | transferencia.
+  // registradaPorId (quien cobro) y salonId (sede) apuntan a public.usuario y
+  // public.salon; null en compras por Stripe desde la app. Un mismo ticket de
+  // caja agrupa sus lineas por grupoCompraId y las numera con numeroItem.
+  metodoPago            String    @default("stripe") @map("metodo_pago") @db.VarChar(20)
+  registradaPorId       String?   @map("registrada_por_id") @db.Uuid
+  salonId               String?   @map("salon_id") @db.Uuid
+  grupoCompraId         String?   @map("grupo_compra_id") @db.Uuid
+  numeroItem            Int?      @map("numero_item")
+  // Por que una venta de caja se cancelo o se marco como reembolsada.
+  motivoEstado          String?   @map("motivo_estado")
+
   paquete Paquete @relation(fields: [paqueteId], references: [id])
 
   @@index([usuarioId])
+  @@index([grupoCompraId], map: "idx_compra_grupo")
   @@index([stripePaymentIntentId])
   @@index([idempotencyKey])
   @@map("compra")

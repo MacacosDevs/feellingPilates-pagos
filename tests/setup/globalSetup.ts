@@ -12,9 +12,9 @@ const schemaPath = path.resolve(__dirname, "../../prisma/schema.prisma");
 let container: StartedPostgreSqlContainer;
 
 // Corre una vez para toda la suite (fileParallelism:false en vitest.config.ts):
-// levanta un Postgres real via Testcontainers, crea el stub de la tabla
-// public.usuario que la migracion baseline referencia via FK cross-schema
-// (ver prisma/migrations/00000000000000_baseline/migration.sql), y aplica
+// levanta un Postgres real via Testcontainers, crea stubs de las tablas de
+// "public" que las migraciones referencian via FK cross-schema (usuario en el
+// baseline; salon y tipo_actividad en columnas_caja), y aplica
 // las migraciones del servicio con `prisma migrate deploy`.
 export async function setup(): Promise<void> {
   container = await new PostgreSqlContainer("postgres:16-alpine")
@@ -29,9 +29,11 @@ export async function setup(): Promise<void> {
   try {
     // Este servicio no es dueno de la tabla usuario (vive en el schema
     // "public" del backend Java); en produccion ya existe. Aqui creamos solo
-    // el minimo necesario para que la FK compra.usuario_id_fkey pueda
-    // aplicarse durante la migracion baseline.
-    await bootstrap.$executeRawUnsafe(`CREATE TABLE IF NOT EXISTS public.usuario (id UUID PRIMARY KEY)`);
+    // el minimo necesario para que las FKs cross-schema puedan aplicarse
+    // durante las migraciones (salon y tipo_actividad igual, ver columnas_caja).
+    for (const tabla of ["usuario", "salon", "tipo_actividad"]) {
+      await bootstrap.$executeRawUnsafe(`CREATE TABLE IF NOT EXISTS public.${tabla} (id UUID PRIMARY KEY)`);
+    }
   } finally {
     await bootstrap.$disconnect();
   }

@@ -3,6 +3,7 @@ import { prisma } from "../../src/lib/prisma.js";
 
 export async function limpiarBD(): Promise<void> {
   await prisma.compra.deleteMany();
+  await prisma.paqueteActividad.deleteMany();
   await prisma.paquete.deleteMany();
   await prisma.$executeRawUnsafe(`DELETE FROM public.usuario`);
 }
@@ -13,7 +14,7 @@ export async function crearUsuario(id: string = randomUUID()): Promise<string> {
 }
 
 interface PaqueteOverrides {
-  categoria?: string;
+  categoria?: string | null;
   nombre?: string;
   precioCentavos?: number;
   vigenciaDias?: number;
@@ -24,7 +25,8 @@ interface PaqueteOverrides {
 export async function crearPaquete(overrides: PaqueteOverrides = {}) {
   return prisma.paquete.create({
     data: {
-      categoria: overrides.categoria ?? "pilates",
+      // `in` y no `??`: null es un valor valido (paquete de caja sin categoria).
+      categoria: "categoria" in overrides ? overrides.categoria : "pilates",
       nombre: overrides.nombre ?? "Paquete de prueba",
       precioCentavos: overrides.precioCentavos ?? 10_000,
       vigenciaDias: overrides.vigenciaDias ?? 30,
@@ -43,6 +45,7 @@ interface CompraOverrides {
   idempotencyKey?: string | null;
   fechaExpiracion?: Date | null;
   moneda?: string;
+  metodoPago?: string;
 }
 
 export async function crearCompra(overrides: CompraOverrides) {
@@ -56,6 +59,7 @@ export async function crearCompra(overrides: CompraOverrides) {
       idempotencyKey: overrides.idempotencyKey ?? null,
       fechaExpiracion: overrides.fechaExpiracion ?? null,
       moneda: overrides.moneda ?? "mxn",
+      metodoPago: overrides.metodoPago ?? "stripe",
     },
   });
 }

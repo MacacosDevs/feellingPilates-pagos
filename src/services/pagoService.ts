@@ -16,9 +16,10 @@ export interface CrearPagoResponse {
 export interface CompraResponse {
   id: string;
   paqueteNombre: string;
-  categoria: string;
+  categoria: string | null;
   montoCentavos: number;
   estado: string;
+  metodoPago: string;
   creadoEn: Date;
   fechaExpiracion: Date | null;
   tarjetaMarca: string | null;
@@ -260,6 +261,7 @@ export async function obtenerHistorialCompras(usuarioId: string): Promise<Compra
     categoria: c.paquete.categoria,
     montoCentavos: c.montoCentavos,
     estado: c.estado,
+    metodoPago: c.metodoPago,
     creadoEn: c.creadoEn,
     fechaExpiracion: c.fechaExpiracion,
     tarjetaMarca: c.tarjetaMarca,
@@ -411,9 +413,20 @@ async function marcarComoFallida(intent: Stripe.PaymentIntent): Promise<void> {
 // obtenerPaquetesActivos): si hay vigencias distintas en cada categoria, se
 // apila sobre la que este mas lejos, para no dejar hueco de cobertura en
 // ninguna de las dos.
-async function calcularFechaExpiracion(usuarioId: string, paquete: { categoria: string; vigenciaDias: number }): Promise<Date> {
+//
+// Un paquete sin categoria (paquete de caja, compuesto por actividades) no se
+// apila: todavia no hay regla para comparar composiciones distintas, asi que
+// su vigencia arranca desde ahora.
+async function calcularFechaExpiracion(
+  usuarioId: string,
+  paquete: { categoria: string | null; vigenciaDias: number },
+): Promise<Date> {
   const ahora = new Date();
-  const categoriasCubiertas = paquete.categoria === "combo" ? ["pilates", "bacu_fit"] : [paquete.categoria];
+  if (paquete.categoria === null) {
+    return new Date(ahora.getTime() + paquete.vigenciaDias * 86_400_000);
+  }
+  const categoriasCubiertas: (string | null)[] =
+    paquete.categoria === "combo" ? ["pilates", "bacu_fit"] : [paquete.categoria];
 
   const vigentes = await prisma.compra.findMany({
     where: { usuarioId, estado: "pagada", fechaExpiracion: { gt: ahora } },
@@ -507,6 +520,13 @@ export async function reembolsarCompra(compraId: string): Promise<ReembolsoRespo
   }
   if (compra.estado !== "pagada") {
     throw new ValidacionError("Solo se puede reembolsar una compra pagada");
+  }
+  // Una venta de caja (efectivo/transferencia) no tiene PaymentIntent: no hay
+  // nada que devolver por Stripe, y ademas el `where` de abajo con
+  // stripePaymentIntentId null agruparia TODAS las ventas de caja como si
+  // fueran un mismo carrito.
+  if (compra.metodoPago !== "stripe" || !compra.stripePaymentIntentId) {
+    throw new ValidacionError("Solo se pueden reembolsar por Stripe compras pagadas con Stripe");
   }
 
   const grupo = await prisma.compra.findMany({ where: { stripePaymentIntentId: compra.stripePaymentIntentId } });
