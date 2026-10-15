@@ -20,12 +20,21 @@ function esErrorConocido(err: unknown): err is ErrorConocido {
 // un compraId/paqueteId con formato invalido llegaba sin validar hasta
 // Prisma, que lanzaba PrismaClientKnownRequestError con ese detalle interno,
 // y este handler lo reenviaba directo en el body de la respuesta 500.
+//
+// `message` se agrega ademas de `error` (duplicando el mismo texto) porque
+// el cliente movil/web ya tiene un unico `apiFetch` compartido con el
+// backend Java, que lee `body.message` (asi responde su
+// GlobalExceptionHandler: `error` ahi es la frase generica del status,
+// "Bad Request", y el texto especifico va en `message`). No se adopta el
+// shape completo de Java (no se cambia que significa `error` aqui, que ya
+// usan los tests y cualquier otro consumidor de esta API) -- solo se agrega
+// el campo que al cliente le hacia falta para mostrar el mensaje real.
 export function manejadorErrores(err: unknown, _req: Request, res: Response, _next: NextFunction): void {
   if (esErrorConocido(err)) {
     if (err.status >= 500) {
       console.error("[error]", err);
     }
-    const cuerpo: Record<string, unknown> = { error: err.message };
+    const cuerpo: Record<string, unknown> = { error: err.message, message: err.message };
     if (err instanceof ErrorPago) {
       cuerpo.origen = err.origen;
     }
@@ -39,10 +48,11 @@ export function manejadorErrores(err: unknown, _req: Request, res: Response, _ne
   // porque le sirve al cliente para corregir su request.
   const posibleErrorDeParseo = err as { status?: number; type?: string; expose?: boolean; message?: string };
   if (posibleErrorDeParseo.type === "entity.parse.failed" && posibleErrorDeParseo.status === 400 && posibleErrorDeParseo.expose) {
-    res.status(400).json({ error: posibleErrorDeParseo.message ?? "JSON invalido" });
+    const mensaje = posibleErrorDeParseo.message ?? "JSON invalido";
+    res.status(400).json({ error: mensaje, message: mensaje });
     return;
   }
 
   console.error("[error]", err);
-  res.status(500).json({ error: "Error interno" });
+  res.status(500).json({ error: "Error interno", message: "Error interno" });
 }

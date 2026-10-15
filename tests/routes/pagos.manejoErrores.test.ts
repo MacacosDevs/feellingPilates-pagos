@@ -99,4 +99,37 @@ describe("Contencion de fuga de informacion interna en errores", () => {
     expect(res.body.error).toBe("Error interno");
     expect(res.body.error).not.toMatch(/password|SELECT/i);
   });
+
+  // HALLAZGO (integracion con la app movil, confirmado leyendo
+  // feellingPilates/.../GlobalExceptionHandler.java): el cliente HTTP
+  // compartido de la app (apiFetch) lee `body.message` para mostrarle el
+  // error al usuario -- asi responde el backend Java. Este servicio solo
+  // devolvia `error`, nunca `message`, asi que cualquier error de pagos le
+  // mostraba al usuario el texto generico "Ocurrio un error inesperado" en
+  // vez del mensaje real.
+  it("todo error de este servicio incluye tambien 'message' (lo que lee el cliente movil/web compartido)", async () => {
+    const usuarioId = await crearUsuario();
+    const token = generarToken({ sub: usuarioId });
+
+    const res = await request(app)
+      .post("/api/pagos/paquetes/intento")
+      .set("Authorization", `Bearer ${token}`)
+      .send({ paqueteIds: [] });
+
+    expect(res.status).toBe(400);
+    expect(res.body.message).toBe(res.body.error);
+    expect(res.body.message).toBe("Debes seleccionar al menos un paquete");
+  });
+
+  it("el 500 generico tambien incluye 'message', igual a 'error'", async () => {
+    const appDePrueba = express();
+    appDePrueba.get("/explota", () => {
+      throw new Error("detalle interno");
+    });
+    appDePrueba.use(manejadorErrores);
+
+    const res = await request(appDePrueba).get("/explota");
+
+    expect(res.body).toEqual({ error: "Error interno", message: "Error interno" });
+  });
 });

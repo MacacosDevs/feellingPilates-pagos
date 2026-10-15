@@ -68,7 +68,7 @@ pagosRouter.post("/webhook", async (req, res, next) => {
   try {
     const firma = req.header("Stripe-Signature");
     if (!firma) {
-      res.status(400).json({ error: "Falta el header Stripe-Signature" });
+      res.status(400).json({ error: "Falta el header Stripe-Signature", message: "Falta el header Stripe-Signature" });
       return;
     }
     const evento = pagoService.construirEventoWebhook(req.body as Buffer, firma);
