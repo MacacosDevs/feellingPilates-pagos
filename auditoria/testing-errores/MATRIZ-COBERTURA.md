@@ -2,7 +2,7 @@
 
 Fuente de verdad de esta ronda de pruebas (no las conversaciones ni el chat que la generó). Corresponde al prompt "Pruebas de errores del microservicio de pagos" ejecutado sobre `feellingPilates-pagos` en la rama `AlanGP2001/lungfish`.
 
-Última corrida verificada: 2026-09-22, `npm test` → **82/82 PASS** (69 del prompt original + 5 al corregir P1-3 + 1 neto al corregir P1-1 + 1 neto al corregir P1-2 + 6 al corregir P1-4, hallazgo descubierto al aclarar P2-1 con el dueño del producto), 3+ corridas consecutivas sin flakiness (ver notas de infraestructura al final).
+Última corrida verificada: 2026-10-14, `npm test` → **84/84 PASS** (69 del prompt original + 5 al corregir P1-3 + 1 neto al corregir P1-1 + 1 neto al corregir P1-2 + 6 al corregir P1-4 + 2 al corregir P1-5, hallazgo de integración con la app móvil), 3+ corridas consecutivas sin flakiness (ver notas de infraestructura al final).
 
 ## Infraestructura de pruebas
 
@@ -142,7 +142,7 @@ Fuente de verdad de esta ronda de pruebas (no las conversaciones ni el chat que 
 | 50 | Body JSON malformado en `POST intento` → 400 con mensaje de sintaxis (comportamiento correcto ya existente, ahora fijado con test) | PASS | `tests/routes/pagos.manejoErrores.test.ts` |
 | 51 | Un error no anticipado por este servicio (bug, excepción de terceros) → 500 genérico, sin filtrar el mensaje original | PASS | `tests/routes/pagos.manejoErrores.test.ts` |
 
-**Total combinado: 82/82 PASS.**
+**Total combinado: 84/84 PASS.**
 
 ## Hallazgos
 
@@ -194,6 +194,14 @@ Fuente de verdad de esta ronda de pruebas (no las conversaciones ni el chat que 
 - **Evidencia (re-ejecutada después del fix)**: 6 tests nuevos en `tests/routes/pagos.webhook.test.ts` (dentro de `describe("la vigencia se apila entre compras (no se pisa)")`, línea 139): mismo carrito apila 30+30=60; compra nueva extiende desde la vigente; sin vigencia previa arranca desde ahora; combo se apila sobre la más lejana; categorías distintas no se mezclan sin combo; `obtenerPaquetesActivos` refleja el total apilado. `npm test` completo → 82/82 PASS, corrida el 2026-09-22 después de aplicar el fix.
 - **Estado de la corrección**: **CORREGIDO y verificado** (suite completa vuelta a correr después del cambio antes de marcarlo resuelto).
 
+### P1-5 — [CORREGIDO] Las respuestas de error no incluían `message`, el campo que lee el cliente HTTP compartido de la app móvil/web
+
+- **Cómo se encontró**: al planear la integración con la app móvil (`feellingPilatesApp`, React Native) e inspeccionar su código. `src/api/client.ts` (su `apiFetch`, compartido por TODAS las llamadas de la app, no solo pagos) lee `body?.message` del error y, si no existe, muestra el texto genérico `"Ocurrió un error inesperado"`. Ese formato (`{ timestamp, status, error, message, path, fieldErrors }`) es el que devuelve el `GlobalExceptionHandler` del backend Java — ahí `error` es la frase genérica del status HTTP ("Bad Request") y `message` es el texto específico.
+- **Qué pasaba**: este microservicio solo devolvía `{ error: "<mensaje especifico>" }` (sin `message`). Cualquier error real de pagos — paquete inexistente, compra en mal estado, decline de Stripe, etc. — se le mostraba al usuario de la app como el genérico `"Ocurrió un error inesperado"` en vez del mensaje real y útil para corregir lo que falló.
+- **Corrección aplicada**: `src/middleware/errores.ts` y el caso especial de falta de firma en `src/routes/pagos.ts` ahora agregan `message` con el mismo texto que ya va en `error`, en los 4 lugares donde se construye un body de error (errores conocidos, error de parseo de JSON, 500 genérico, falta de `Stripe-Signature`). **No se adoptó el shape completo de Java** (no se cambió qué significa `error` aquí — sigue siendo el mensaje específico, no la frase genérica del status) para no romper el contrato ya usado por los 82 tests existentes ni por cualquier otro consumidor de esta API; se agregó únicamente el campo que al cliente le hacía falta.
+- **Evidencia (re-ejecutada después del fix)**: 2 tests nuevos en `tests/routes/pagos.manejoErrores.test.ts` (confirman que `message === error` en un error de dominio y en el 500 genérico). `npm test` completo → 84/84 PASS, corrida el 2026-10-14 después de aplicar el fix.
+- **Estado de la corrección**: **CORREGIDO y verificado**.
+
 ### P1-3 — [CORREGIDO] `compraId`/`paqueteId` con formato inválido llegaban sin validar a Prisma, que filtraba su error interno (ruta de archivo, línea, stack) al cliente en la respuesta 500
 
 - **Dónde (antes del fix)**: `src/services/pagoService.ts` — `obtenerEstadoEnVivo` (línea 232 original), `reembolsarCompra` (línea 428 original) y `crearIntentoPago` (línea 82) pasaban el id recibido del cliente directo a una columna `@db.Uuid` de Prisma sin validar su formato. `src/middleware/errores.ts` reenviaba `error.message` de **cualquier** error (no solo los construidos a propósito por este servicio) en el body de la respuesta.
@@ -217,4 +225,8 @@ Fuente de verdad de esta ronda de pruebas (no las conversaciones ni el chat que 
 - No se modificó `prisma/schema.prisma` ni se generaron migraciones nuevas para ninguno de los 4 hallazgos corregidos: todas las estrategias elegidas (espera con reintentos cortos para P1-1; `idempotencyKey` determinística por `PaymentIntent` para P1-2; apilar sobre la vigencia existente para P1-4) evitan necesitar una constraint única o un cambio de esquema. El único cambio de infraestructura de pruebas es el stub `public.usuario` creado en tiempo de test dentro del contenedor efímero (`tests/setup/globalSetup.ts`), no en el schema del servicio.
 - P2-1 se cerró sin cambio de código: era una decisión de producto (¿`paqueteIds` duplicados es "comprar 2 unidades" o un error de doble-envío?), y el dueño del producto confirmó que es "comprar 2 unidades" intencional — el comportamiento de cobro doble ya era correcto.
 - Esa misma aclaración destapó un hallazgo nuevo y más importante (P1-4): aunque el cobro doble era correcto, el beneficio (vigencia) no se sumaba. Ningún hallazgo se cerró por asumir intención sin verificar contra el código real.
-- P1-1, P1-2, P1-3 y P1-4 se corrigieron dentro de esta tarea: P1-3 porque era una validación defensiva mecánica sin ambigüedad de diseño; P1-1, P1-2 y P1-4 porque, aunque cada uno implicaba una decisión (de concurrencia o de negocio), en los tres casos había una estrategia sin cambio de esquema ni necesidad de mantener una transacción de BD abierta durante una llamada de red a Stripe. En los 4 casos se volvió a correr toda la suite después del cambio antes de marcarlos como resueltos.
+- P1-1, P1-2, P1-3, P1-4 y P1-5 se corrigieron dentro de esta tarea: P1-3 y P1-5 porque eran cambios mecánicos sin ambigüedad de diseño; P1-1, P1-2 y P1-4 porque, aunque cada uno implicaba una decisión (de concurrencia o de negocio), en los tres casos había una estrategia sin cambio de esquema ni necesidad de mantener una transacción de BD abierta durante una llamada de red a Stripe. En los 5 casos se volvió a correr toda la suite después del cambio antes de marcarlos como resueltos.
+
+## Nota operacional (no es un hallazgo de código, no corregible desde este repo)
+
+Al planear la integración con la app móvil (2026-10-14) se confirmó en vivo, sin credenciales, que **`STRIPE_SECRET_KEY` está vacío en el ambiente de QA** (VPS `srv1863965.hstgr.cloud`, `46.202.176.30:8081`): un `POST /api/pagos/webhook` con firma inválida responde `503 "Stripe no esta configurado en este ambiente"` en vez de `400 "Firma de webhook de Stripe invalida"` (comportamiento ya cubierto por la rama `AlanGP2001/stripe-sin-clave`, desplegada ahí). Mientras eso no se configure, `POST /paquetes/intento` también va a responder `503` apenas se intente un pago real desde la app — bloqueante para probar el flujo end-to-end, pendiente de que alguien con acceso SSH al VPS lo configure.
